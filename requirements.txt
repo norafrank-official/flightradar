@@ -1,0 +1,7 @@
+streamlit
+FlightRadarAPI
+streamlit-js-eval
+folium
+streamlit-folium
+requests
+pandas
