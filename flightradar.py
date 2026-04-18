@@ -9,19 +9,22 @@ from streamlit_folium import st_folium
 # --- CONFIGURATION ---
 # Replace with your key from https://openweathermap.org/
 # For deployment, use: WEATHER_API_KEY = st.secrets["WEATHER_API_KEY"]
-WEATHER_API_KEY = "ca09bf0a26e46d745eeff8da704aa2e2" 
+WEATHER_API_KEY = "YOUR_OPENWEATHER_API_KEY" 
 
 st.set_page_config(page_title="SkyWatcher Pro", layout="wide", page_icon="✈️")
 
-# --- CSS FOR STYLING (CORRECTED) ---
+# --- CSS FOR STYLING ---
 st.markdown("""
     <style>
     .main {
         background-color: #0e1117;
     }
     div[data-testid="stMetricValue"] {
-        font-size: 24px;
+        font-size: 22px;
         color: #00d4ff;
+    }
+    h3 {
+        padding-top: 1rem;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -38,23 +41,22 @@ def get_weather_data(lat, lon):
         return None
 
 def get_spotting_advice(weather_json):
-    """Calculates if plane spotting is ideal based on atmospheric conditions."""
+    """Calculates if plane spotting is ideal."""
     clouds = weather_json.get("clouds", {}).get("all", 0)
     main_weather = weather_json.get("weather", [{}])[0].get("main", "")
     
     if main_weather in ["Rain", "Thunderstorm", "Drizzle", "Snow"]:
-        return "❌ Poor", "Precipitation detected. Visibility is low and gear might get wet.", "red"
+        return "❌ Poor", "Rain/Storm detected. Visibility is low.", "red"
     elif clouds > 80:
-        return "⚠️ Marginal", "Heavy cloud cover. Planes will be mostly obscured by the ceiling.", "orange"
+        return "⚠️ Marginal", "Heavy clouds. Planes might be hidden.", "orange"
     elif 20 <= clouds <= 80:
-        return "✅ Good", "Mixed clouds. Good for photography with dynamic lighting.", "blue"
+        return "✅ Good", "Mixed clouds. Good for dramatic spotting.", "blue"
     else:
-        return "🌟 Excellent", "Clear skies! Perfect visibility for high-altitude spotting.", "green"
+        return "🌟 Excellent", "Clear skies! Perfect visibility.", "green"
 
 # --- MAIN APP LOGIC ---
 
 st.title("✈️ SkyWatcher Pro")
-st.markdown("### Real-time Flight & Weather Intelligence")
 
 # 1. Get User Location via Browser
 loc = get_geolocation()
@@ -65,88 +67,88 @@ else:
     lat = loc['coords']['latitude']
     lon = loc['coords']['longitude']
     
-    # 2. Weather & Spotting Index Section
+    # 2. WEATHER & SPOTTING SECTION
     weather = get_weather_data(lat, lon)
     if weather:
         status, advice, color = get_spotting_advice(weather)
         
-        with st.container():
-            st.subheader(f"📍 Conditions at {weather.get('name', 'Your Location')}")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Temperature", f"{weather['main']['temp']}°C")
-            m2.metric("Cloud Cover", f"{weather['clouds']['all']}%")
-            m3.metric("Visibility", f"{weather['visibility']/1000} km")
-            m4.metric("Spotter Index", status)
-            st.info(f"**Spotter's Note:** {advice}")
+        st.subheader(f"📍 Conditions at {weather.get('name', 'Current Location')}")
+        w1, w2, w3, w4 = st.columns(4)
+        w1.metric("Temp", f"{weather['main']['temp']}°C")
+        w2.metric("Clouds", f"{weather['clouds']['all']}%")
+        w3.metric("Visibility", f"{weather['visibility']/1000} km")
+        w4.metric("Spotter Index", status)
+        st.info(f"**Pro Tip:** {advice}")
+    else:
+        st.error("Weather data unavailable. Please check your API Key.")
 
     st.divider()
 
-    # 3. Flight Radar Section
+    # 3. FLIGHT RADAR SECTION
     st.subheader("📡 Live Radar (10km Radius)")
     
     fr_api = FlightRadar24API()
-    # Scans a 10km radius (10,000 meters)
     bounds = fr_api.get_bounds_by_point(lat, lon, 10000) 
     flights = fr_api.get_flights(bounds=bounds)
 
     if flights:
-        col_map, col_list = st.columns([2, 1])
-        
-        # Setup Map - Using 'CartoDB dark_matter' for a "Command Center" look
+        # Map Display
         m = folium.Map(location=[lat, lon], zoom_start=13, tiles='CartoDB dark_matter')
-        folium.Marker([lat, lon], tooltip="You are here", icon=folium.Icon(color='red', icon='user', prefix='fa')).add_to(m)
+        folium.Marker([lat, lon], tooltip="You", icon=folium.Icon(color='red', icon='user', prefix='fa')).add_to(m)
 
-        flight_details_list = []
+        journey_data = []
+        tech_data = []
 
         for f in flights:
-            # Fetching deep details for Airline/Route names (as per your friend's suggestion)
             try:
                 details = fr_api.get_flight_details(f)
                 f.set_flight_details(details)
                 
-                airline = f.airline_name if f.airline_name else "Private/Unknown"
+                airline = f.airline_name if f.airline_name else "Private"
                 flight_no = f.number if f.number else f.callsign
                 origin = f.origin_airport_name if f.origin_airport_name else "Unknown"
-                destination = f.destination_airport_name if f.destination_airport_name else "Unknown"
+                dest = f.destination_airport_name if f.destination_airport_name else "Unknown"
             except:
-                airline, flight_no, origin, destination = "N/A", f.callsign, "N/A", "N/A"
+                airline, flight_no, origin, dest = "N/A", f.callsign, "N/A", "N/A"
 
-            # Add Plane to Map
-            folium.Marker(
-                [f.latitude, f.longitude],
-                popup=f"<b>{airline}</b><br>Flight: {flight_no}<br>To: {destination}",
-                tooltip=f"{airline} - {flight_no}",
-                icon=folium.Icon(color='lightblue', icon='plane', prefix='fa')
-            ).add_to(m)
-            
-            # Add to Data Table
-            flight_details_list.append({
+            # Populate Table 1: Journey
+            journey_data.append({
                 "Airline": airline,
                 "Flight": flight_no,
                 "From": origin,
-                "To": destination,
-                "Altitude": f"{f.altitude:,} ft"
+                "To": dest
+            })
+            
+            # Populate Table 2: Technical
+            tech_data.append({
+                "Flight": flight_no,
+                "Alt (ft)": f"{f.altitude:,}",
+                "Speed (kt)": f.ground_speed,
+                "Heading": f"{f.heading}°"
             })
 
-        with col_map:
-            st_folium(m, width=800, height=500, returned_objects=[], key="flight_map")
+            # Add Marker
+            folium.Marker(
+                [f.latitude, f.longitude],
+                popup=f"<b>{airline}</b><br>{flight_no}",
+                icon=folium.Icon(color='lightblue', icon='plane', prefix='fa')
+            ).add_to(m)
+
+        # UI Layout
+        st_folium(m, width=1200, height=450, returned_objects=[], key="main_map")
         
-        with col_list:
-            st.write("**Aircraft Details**")
-            df = pd.DataFrame(flight_details_list)
-            st.dataframe(df, hide_index=True, use_container_width=True)
+        st.write("### ✈️ Journey Details")
+        st.dataframe(pd.DataFrame(journey_data), hide_index=True, use_container_width=True)
+        
+        st.write("### 📊 Technical Intelligence")
+        st.dataframe(pd.DataFrame(tech_data), hide_index=True, use_container_width=True)
             
     else:
-        st.warning("The sky is quiet! No flights detected within 10km.")
+        st.warning("No flights detected within 10km of your current GPS position.")
 
-# Sidebar Info
-st.sidebar.title("App Intelligence")
-st.sidebar.info(
-    "This app combines ADS-B transponder data with local meteorological data to provide a comprehensive spotting dashboard."
-)
+st.sidebar.title("SkyWatcher Pro")
 st.sidebar.markdown("""
-**Data Stack:**
-- **Radar:** FlightRadar24 API
-- **Weather:** OpenWeather API
-- **UI:** Streamlit & Folium
+- **Radar:** FlightRadar24
+- **Weather:** OpenWeatherMap
+- **UI:** Streamlit
 """)
