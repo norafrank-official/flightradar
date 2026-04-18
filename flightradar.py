@@ -9,7 +9,7 @@ from streamlit_folium import st_folium
 # --- CONFIGURATION ---
 # Replace with your key from https://openweathermap.org/
 # For deployment, use: WEATHER_API_KEY = st.secrets["WEATHER_API_KEY"]
-WEATHER_API_KEY = "YOUR_OPENWEATHER_API_KEY" 
+WEATHER_API_KEY = "ca09bf0a26e46d745eeff8da704aa2e2" 
 
 st.set_page_config(page_title="SkyWatcher Pro", layout="wide", page_icon="✈️")
 
