@@ -1,5 +1,6 @@
 streamlit
 FlightRadarAPI
+beautifulsoup4
 streamlit-js-eval
 folium
 streamlit-folium
