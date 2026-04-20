@@ -6,3 +6,4 @@ folium
 streamlit-folium
 requests
 pandas
+streamlit-autorefresh
