@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import folium
 from FlightRadar24 import FlightRadar24API
-from streamlit_js_eval import get_geolocation
 from streamlit_folium import st_folium
 from streamlit_autorefresh import st_autorefresh
 
@@ -26,6 +25,15 @@ st.markdown("""
 
 # --- FUNCTIONS ---
 
+def get_ip_location():
+    """Fetches location based on IP address. No browser popups needed."""
+    try:
+        response = requests.get('https://ipapi.co/json/', timeout=5).json()
+        return float(response.get('latitude')), float(response.get('longitude'))
+    except:
+        # Fallback to Thrissur if the API fails
+        return 10.5276, 76.2144
+
 def get_weather(lat, lon):
     try:
         url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric"
@@ -47,17 +55,8 @@ def get_spotting_advice(w_json):
 
 st.title("SkyWatcher Pro")
 
-# 1. Get User Location via Browser
-loc = get_geolocation()
-
-# THE FIX: Bulletproof try-except with a fallback location
-try:
-    lat = float(loc['coords']['latitude'])
-    lon = float(loc['coords']['longitude'])
-except Exception:
-    # Fallback coordinates (Thrissur) so the app NEVER crashes
-    lat, lon = 10.5276, 76.2144
-    st.info("Waiting for live browser GPS permissions... displaying fallback radar in the meantime.")
+# 1. Get Location (Efficient IP Method)
+lat, lon = get_ip_location()
     
 # 2. Weather Dashboard
 weather = get_weather(lat, lon)
@@ -82,7 +81,7 @@ flights = fr_api.get_flights(bounds=bounds)
 if flights:
     # Map Zoom 10 for 50km radius
     m = folium.Map(location=[lat, lon], zoom_start=10, tiles='CartoDB dark_matter')
-    folium.Marker([lat, lon], tooltip="Radar Center", icon=folium.Icon(color='red', icon='user', prefix='fa')).add_to(m)
+    folium.Marker([lat, lon], tooltip="Your Area", icon=folium.Icon(color='red', icon='user', prefix='fa')).add_to(m)
 
     journey_data = []
     tech_data = []
