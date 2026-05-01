@@ -8,7 +8,6 @@ from streamlit_folium import st_folium
 from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURATION ---
-# Replace with your actual key or use st.secrets["WEATHER_API_KEY"]
 WEATHER_API_KEY = "ca09bf0a26e46d745eeff8da704aa2e2" 
 
 st.set_page_config(page_title="SkyWatcher Pro", layout="wide")
@@ -51,110 +50,109 @@ st.title("SkyWatcher Pro")
 # 1. Get User Location via Browser
 loc = get_geolocation()
 
-# THE FIX: Making the check smarter to handle browser blocks or errors gracefully
-if not loc or 'coords' not in loc:
-    st.info("Waiting for GPS... Please ensure location access is allowed in your browser settings.")
+# THE FIX: Bulletproof try-except with a fallback location
+try:
+    lat = float(loc['coords']['latitude'])
+    lon = float(loc['coords']['longitude'])
+except Exception:
+    # Fallback coordinates (Thrissur) so the app NEVER crashes
+    lat, lon = 10.5276, 76.2144
+    st.info("Waiting for live browser GPS permissions... displaying fallback radar in the meantime.")
     
-    # Optional Pro-Touch: Show the exact error if the browser denied it
-    if loc and isinstance(loc, dict) and 'message' in loc:
-        st.warning(f"Browser Location Error: {loc['message']}")
-else:
-    lat, lon = loc['coords']['latitude'], loc['coords']['longitude']
-    
-    # 1. Weather Dashboard
-    weather = get_weather(lat, lon)
-    if weather:
-        status, advice, color = get_spotting_advice(weather)
-        w1, w2, w3, w4 = st.columns(4)
-        w1.metric("Temp", f"{weather['main']['temp']}°C")
-        w2.metric("Clouds", f"{weather['clouds']['all']}%")
-        vis = weather['visibility']/1000
-        w3.metric("Visibility", "10+ km" if vis >= 10 else f"{vis} km")
-        w4.metric("Spotter Index", status)
-        st.info(f"**Spotter Note:** {advice}")
+# 2. Weather Dashboard
+weather = get_weather(lat, lon)
+if weather:
+    status, advice, color = get_spotting_advice(weather)
+    w1, w2, w3, w4 = st.columns(4)
+    w1.metric("Temp", f"{weather['main']['temp']}°C")
+    w2.metric("Clouds", f"{weather['clouds']['all']}%")
+    vis = weather['visibility'] / 1000
+    w3.metric("Visibility", "10+ km" if vis >= 10 else f"{vis} km")
+    w4.metric("Spotter Index", status)
+    st.info(f"**Spotter Note:** {advice}")
 
-    st.divider()
+st.divider()
 
-    # 2. Flight Radar Logic
-    fr_api = FlightRadar24API()
-    # Scans 50km radius
-    bounds = fr_api.get_bounds_by_point(lat, lon, 50000) 
-    flights = fr_api.get_flights(bounds=bounds)
+# 3. Flight Radar Logic
+fr_api = FlightRadar24API()
+# Scans 50km radius
+bounds = fr_api.get_bounds_by_point(lat, lon, 50000) 
+flights = fr_api.get_flights(bounds=bounds)
 
-    if flights:
-        # Map Zoom 10 for 50km radius
-        m = folium.Map(location=[lat, lon], zoom_start=10, tiles='CartoDB dark_matter')
-        folium.Marker([lat, lon], icon=folium.Icon(color='red', icon='user', prefix='fa')).add_to(m)
+if flights:
+    # Map Zoom 10 for 50km radius
+    m = folium.Map(location=[lat, lon], zoom_start=10, tiles='CartoDB dark_matter')
+    folium.Marker([lat, lon], tooltip="Radar Center", icon=folium.Icon(color='red', icon='user', prefix='fa')).add_to(m)
 
-        journey_data = []
-        tech_data = []
+    journey_data = []
+    tech_data = []
 
-        for f in flights:
-            try:
-                # Fetching details for photos and routes
-                details = fr_api.get_flight_details(f)
-                f.set_flight_details(details)
-                
-                # Image URL Extraction
-                img_url = None
-                if 'aircraft' in details and 'images' in details['aircraft']:
-                    images = details['aircraft']['images']
-                    if 'thumbnails' in images and len(images['thumbnails']) > 0:
-                        img_url = images['thumbnails'][0]['src']
-
-                airline = f.airline_name or "Private"
-                flight_no = f.number or f.callsign
-                dest = f.destination_airport_name or "N/A"
-
-                # Table 1: Journey Data
-                journey_data.append({
-                    "Preview": img_url,
-                    "Airline": airline,
-                    "Flight": flight_no,
-                    "To": dest
-                })
-                
-                # Table 2: Tech Data
-                tech_data.append({
-                    "Flight": flight_no,
-                    "Alt (ft)": f"{f.altitude:,}",
-                    "Speed (kt)": f.ground_speed,
-                    "Heading": f"{f.heading}°"
-                })
-
-                # Map Marker
-                folium.Marker(
-                    [f.latitude, f.longitude],
-                    popup=f"<b>{flight_no}</b>",
-                    icon=folium.Icon(color='lightblue', icon='plane', prefix='fa')
-                ).add_to(m)
-            except:
-                continue
-
-        # --- UI LAYOUT ---
-        st_folium(m, width=1200, height=450, returned_objects=[], key="map_global")
-        
-        # Journey Table (With Photos)
-        st.write("### Journey Details")
-        st.dataframe(
-            pd.DataFrame(journey_data),
-            column_config={
-                "Preview": st.column_config.ImageColumn("Preview"),
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-        
-        # Technical Table
-        st.write("### Technical Intelligence")
-        st.dataframe(
-            pd.DataFrame(tech_data),
-            hide_index=True, 
-            use_container_width=True
-        )
+    for f in flights:
+        try:
+            # Fetching details for photos and routes
+            details = fr_api.get_flight_details(f)
+            f.set_flight_details(details)
             
-    else:
-        st.warning("No flights detected within 50km. The sky is clear!")
+            # Image URL Extraction
+            img_url = None
+            if 'aircraft' in details and 'images' in details['aircraft']:
+                images = details['aircraft']['images']
+                if 'thumbnails' in images and len(images['thumbnails']) > 0:
+                    img_url = images['thumbnails'][0]['src']
+
+            airline = f.airline_name or "Private"
+            flight_no = f.number or f.callsign
+            dest = f.destination_airport_name or "N/A"
+
+            # Table 1: Journey Data
+            journey_data.append({
+                "Preview": img_url,
+                "Airline": airline,
+                "Flight": flight_no,
+                "To": dest
+            })
+            
+            # Table 2: Tech Data
+            tech_data.append({
+                "Flight": flight_no,
+                "Alt (ft)": f"{f.altitude:,}",
+                "Speed (kt)": f.ground_speed,
+                "Heading": f"{f.heading}°"
+            })
+
+            # Map Marker
+            folium.Marker(
+                [f.latitude, f.longitude],
+                popup=f"<b>{flight_no}</b>",
+                icon=folium.Icon(color='lightblue', icon='plane', prefix='fa')
+            ).add_to(m)
+        except:
+            continue
+
+    # --- UI LAYOUT ---
+    st_folium(m, width=1200, height=450, returned_objects=[], key="map_global")
+    
+    # Journey Table (With Photos)
+    st.write("### Journey Details")
+    st.dataframe(
+        pd.DataFrame(journey_data),
+        column_config={
+            "Preview": st.column_config.ImageColumn("Preview"),
+        },
+        hide_index=True,
+        use_container_width=True
+    )
+    
+    # Technical Table
+    st.write("### Technical Intelligence")
+    st.dataframe(
+        pd.DataFrame(tech_data),
+        hide_index=True, 
+        use_container_width=True
+    )
+        
+else:
+    st.warning("No flights detected within 50km. The sky is clear!")
 
 st.sidebar.markdown("---")
 st.sidebar.write("**SkyWatcher Pro v3.0**")
