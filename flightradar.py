@@ -11,7 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 # Replace with your actual key or use st.secrets["WEATHER_API_KEY"]
 WEATHER_API_KEY = "ca09bf0a26e46d745eeff8da704aa2e2" 
 
-st.set_page_config(page_title="SkyWatcher Pro", layout="wide", page_icon="✈️")
+st.set_page_config(page_title="SkyWatcher Pro", layout="wide")
 
 # --- AUTO-REFRESH (Every 15 Seconds) ---
 st_autorefresh(interval=15000, key="radar_pulse")
@@ -39,19 +39,25 @@ def get_spotting_advice(w_json):
     clouds = w_json.get("clouds", {}).get("all", 0)
     main = w_json.get("weather", [{}])[0].get("main", "")
     if main in ["Rain", "Thunderstorm", "Drizzle"]:
-        return "❌ Poor", "Rain/Storms in area.", "red"
+        return "Poor", "Rain/Storms in area.", "red"
     elif clouds > 80:
-        return "⚠️ Marginal", "Heavy cloud cover.", "orange"
-    return ("🌟 Excellent", "Clear skies!", "green") if clouds < 20 else ("✅ Good", "Fair visibility.", "blue")
+        return "Marginal", "Heavy cloud cover.", "orange"
+    return ("Excellent", "Clear skies!", "green") if clouds < 20 else ("Good", "Fair visibility.", "blue")
 
 # --- MAIN APP ---
 
-st.title("✈️ SkyWatcher Pro")
+st.title("SkyWatcher Pro")
 
+# 1. Get User Location via Browser
 loc = get_geolocation()
 
-if not loc:
-    st.info("🛰️ Waiting for GPS... Please allow location access in your browser.")
+# THE FIX: Making the check smarter to handle browser blocks or errors gracefully
+if not loc or 'coords' not in loc:
+    st.info("Waiting for GPS... Please ensure location access is allowed in your browser settings.")
+    
+    # Optional Pro-Touch: Show the exact error if the browser denied it
+    if loc and isinstance(loc, dict) and 'message' in loc:
+        st.warning(f"Browser Location Error: {loc['message']}")
 else:
     lat, lon = loc['coords']['latitude'], loc['coords']['longitude']
     
@@ -129,7 +135,7 @@ else:
         st_folium(m, width=1200, height=450, returned_objects=[], key="map_global")
         
         # Journey Table (With Photos)
-        st.write("### ✈️ Journey Details")
+        st.write("### Journey Details")
         st.dataframe(
             pd.DataFrame(journey_data),
             column_config={
@@ -140,7 +146,7 @@ else:
         )
         
         # Technical Table
-        st.write("### 📊 Technical Intelligence")
+        st.write("### Technical Intelligence")
         st.dataframe(
             pd.DataFrame(tech_data),
             hide_index=True, 
@@ -151,5 +157,5 @@ else:
         st.warning("No flights detected within 50km. The sky is clear!")
 
 st.sidebar.markdown("---")
-st.sidebar.write("📡 **SkyWatcher Pro v3.0**")
+st.sidebar.write("**SkyWatcher Pro v3.0**")
 st.sidebar.info("Auto-refresh is active. Tracking live transponder telemetry.")
