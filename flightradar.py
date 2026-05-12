@@ -3,6 +3,7 @@ import math
 import time
 
 import folium
+import folium.plugins
 import pandas as pd
 import requests
 import streamlit as st
@@ -21,12 +22,12 @@ except Exception:
 SEARCH_RADIUS_M = 10_000  # 10 km — close-range spotting
 
 SQUAWK_ALERTS = {
-    "7700": ("🚨 GENERAL EMERGENCY — Squawk 7700 active", "error"),
-    "7600": ("📻 RADIO FAILURE — Squawk 7600 active", "warning"),
-    "7500": ("✈️ HIJACK ALERT — Squawk 7500 active", "error"),
+    "7700": ("[EMERGENCY] General Emergency — Squawk 7700 active", "error"),
+    "7600": ("[RADIO] Radio Failure — Squawk 7600 active", "warning"),
+    "7500": ("[HIJACK] Hijack Alert — Squawk 7500 active", "error"),
 }
 
-st.set_page_config(page_title="SkyWatcher Pro", layout="wide", page_icon="✈️")
+st.set_page_config(page_title="SkyWatcher Pro", layout="wide", page_icon="radar")
 
 st.markdown("""
     <style>
@@ -45,6 +46,24 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
          + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
     return R * 2 * math.asin(math.sqrt(a))
 
+def project_position(lat: float, lon: float, heading_deg: float, speed_kts: float, minutes: float = 5) -> tuple:
+    """Project aircraft position using bearing and ground speed (haversine forward)."""
+    if heading_deg is None or speed_kts is None or speed_kts == 0:
+        return None
+
+    dist_km = speed_kts * 1.852 * (minutes / 60)
+    R = 6371.0
+    d = dist_km / R
+    bearing = math.radians(heading_deg)
+    lat1, lon1 = math.radians(lat), math.radians(lon)
+
+    lat2 = math.asin(math.sin(lat1) * math.cos(d) + math.cos(lat1) * math.sin(d) * math.cos(bearing))
+    lon2 = lon1 + math.atan2(
+        math.sin(bearing) * math.sin(d) * math.cos(lat1),
+        math.cos(d) - math.sin(lat1) * math.sin(lat2)
+    )
+    return math.degrees(lat2), math.degrees(lon2)
+
 def altitude_color(alt) -> str:
     if not alt:
         return "gray"
@@ -56,12 +75,19 @@ def altitude_color(alt) -> str:
 
 def flight_phase(vs) -> str:
     if vs is None:
-        return "→ Cruising"
+        return "LEVEL"
     if vs < -200:
-        return "↓ Descending"
+        return "DESCENDING"
     if vs > 200:
-        return "↑ Climbing"
-    return "→ Cruising"
+        return "CLIMBING"
+    return "LEVEL"
+
+def calc_eta_to_airport(altitude_ft: float, vertical_speed_ft_per_min: float) -> float:
+    """Rough ETA to runway in minutes. Returns None if not descending."""
+    if not altitude_ft or not vertical_speed_ft_per_min or vertical_speed_ft_per_min >= -100:
+        return None
+    mins_to_ground = altitude_ft / abs(vertical_speed_ft_per_min)
+    return mins_to_ground if mins_to_ground > 0 else None
 
 # --- API FUNCTIONS ---
 
@@ -82,27 +108,27 @@ def get_spotting_advice(w: dict) -> tuple:
     clouds = w.get("clouds", {}).get("all", 0)
     main_wx = w.get("weather", [{}])[0].get("main", "")
     if main_wx in ["Rain", "Thunderstorm", "Drizzle", "Snow"]:
-        return "❌ Poor", "Precipitation detected. Visibility is low and gear might get wet.", "red"
+        return "Poor", "Precipitation detected. Visibility is low and gear might get wet.", "red"
     if clouds > 80:
-        return "⚠️ Marginal", "Heavy cloud cover. Planes mostly obscured by the ceiling.", "orange"
+        return "Marginal", "Heavy cloud cover. Planes mostly obscured by the ceiling.", "orange"
     if 20 <= clouds <= 80:
-        return "✅ Good", "Mixed clouds. Dynamic lighting — great for photography.", "blue"
-    return "🌟 Excellent", "Clear skies! Perfect visibility for high-altitude spotting.", "green"
+        return "Good", "Mixed clouds. Dynamic lighting — great for photography.", "blue"
+    return "Excellent", "Clear skies! Perfect visibility for high-altitude spotting.", "green"
 
 # --- APP ---
 
-st.title("✈️ SkyWatcher Pro")
+st.title("SkyWatcher Pro")
 st.markdown("### Real-time Flight & Weather Intelligence")
 
 if not WEATHER_API_KEY:
-    st.error("⚠️ Weather API key missing. Add `WEATHER_API_KEY` to `.streamlit/secrets.toml`.")
+    st.error("Weather API key missing. Add `WEATHER_API_KEY` to `.streamlit/secrets.toml`.")
 
 # Sidebar
-st.sidebar.title("⚙️ Controls")
+st.sidebar.title("Controls")
 refresh_interval = st.sidebar.selectbox("Auto-Refresh", ["Manual", "15s", "30s", "60s"], index=0)
 st.sidebar.divider()
 density_slot = st.sidebar.empty()
-st.sidebar.title("ℹ️ About")
+st.sidebar.title("About")
 st.sidebar.info("ADS-B transponder data + meteorological data for close-range spotting (~10 km).")
 st.sidebar.markdown("""
 **Data Stack:**
@@ -111,11 +137,15 @@ st.sidebar.markdown("""
 - **UI:** Streamlit & Folium
 """)
 
+# Initialize session state for heatmap
+if "heatmap_points" not in st.session_state:
+    st.session_state.heatmap_points = []
+
 # 1. Location
 loc = get_geolocation()
 
 if not loc:
-    st.info("🛰️ Accessing GPS... Please allow location permissions in your browser.")
+    st.info("Accessing GPS... Please allow location permissions in your browser.")
 else:
     lat = loc["coords"]["latitude"]
     lon = loc["coords"]["longitude"]
@@ -124,7 +154,7 @@ else:
     weather = get_weather_data(lat, lon)
     if weather:
         status, advice, _ = get_spotting_advice(weather)
-        st.subheader(f"📍 Conditions at {weather.get('name', 'Your Location')}")
+        st.subheader(f"Conditions at {weather.get('name', 'Your Location')}")
         m1, m2, m3, m4 = st.columns(4)
         temp = weather.get("main", {}).get("temp", "N/A")
         cloud_pct = weather.get("clouds", {}).get("all", "N/A")
@@ -139,7 +169,7 @@ else:
     st.divider()
 
     # 3. Radar
-    st.subheader("📡 Live Radar (10 km Radius)")
+    st.subheader("Live Radar (10 km Radius)")
 
     try:
         fr_api = FlightRadar24API()
@@ -152,11 +182,11 @@ else:
 
     # Sky density badge
     count = len(flights) if flights else 0
-    badge = "🟢" if count <= 3 else ("🟠" if count <= 8 else "🔴")
-    density_slot.markdown(f"### {badge} Aircraft in Radius: **{count}**")
+    status = "OK" if count <= 3 else ("BUSY" if count <= 8 else "CRITICAL")
+    density_slot.markdown(f"### Aircraft in Radius: **{count}** [{status}]")
 
     if flights:
-        # Squawk alert scan (before map renders — maximum visibility)
+        # Squawk alert scan (before map renders)
         for f in flights:
             sq = str(getattr(f, "squawk", "") or "")
             if sq in SQUAWK_ALERTS:
@@ -167,63 +197,29 @@ else:
                 else:
                     st.warning(f"{msg} — Aircraft: **{cs}**")
 
-        col_map, col_list = st.columns([2, 1])
-
-        # Map setup
-        fmap = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB dark_matter")
-        folium.Marker(
-            [lat, lon],
-            tooltip="You are here",
-            icon=folium.Icon(color="red", icon="user", prefix="fa")
-        ).add_to(fmap)
-        folium.Circle(
-            location=[lat, lon],
-            radius=SEARCH_RADIUS_M,
-            color="#00d4ff",
-            weight=1,
-            fill=True,
-            fill_opacity=0.04,
-        ).add_to(fmap)
-
-        # Airport markers (within ~20 km for context)
-        try:
-            raw_airports = fr_api.get_airports()
-            # API may return a list directly or a dict with an "airports" key
-            if isinstance(raw_airports, dict):
-                airport_list = raw_airports.get("airports", [])
-            elif isinstance(raw_airports, list):
-                airport_list = raw_airports
-            else:
-                airport_list = []
-
-            for ap in airport_list:
-                try:
-                    ap_lat = float(ap.latitude)
-                    ap_lon = float(ap.longitude)
-                    if haversine_km(lat, lon, ap_lat, ap_lon) > 20:
-                        continue
-                    iata = getattr(ap, "iata", None) or getattr(ap, "code", "?")
-                    name = getattr(ap, "name", "Airport")
-                    city = getattr(ap, "city", "")
-                    folium.Marker(
-                        [ap_lat, ap_lon],
-                        popup=f"<b>{iata}</b><br>{name}<br>{city}",
-                        tooltip=iata,
-                        icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
-                    ).add_to(fmap)
-                except Exception:
-                    pass
-        except Exception as e:
-            logging.warning(f"Airport markers failed: {e}")
-
-        # Flight loop
-        rows = []
+        # Process flights
+        journey_rows = []
+        tech_rows = []
         nearest_km = float("inf")
         nearest_info = None
 
         for f in flights:
+            image_url = None
             try:
                 details = fr_api.get_flight_details(f)
+
+                # Extract aircraft image before set_flight_details
+                try:
+                    thumbs = details.get("aircraft", {}).get("images", {}).get("thumbnails", [])
+                    if thumbs:
+                        image_url = thumbs[0].get("src")
+                    if not image_url:
+                        large = details.get("aircraft", {}).get("images", {}).get("large", [])
+                        if large:
+                            image_url = large[0].get("src")
+                except Exception:
+                    pass
+
                 f.set_flight_details(details)
                 airline = f.airline_name or "Private/Unknown"
                 flight_no = f.number or f.callsign
@@ -239,13 +235,39 @@ else:
             alt = getattr(f, "altitude", None)
             vs = getattr(f, "vertical_speed", None)
             spd = getattr(f, "ground_speed", None)
+            heading = getattr(f, "heading", None)
             sq = str(getattr(f, "squawk", "") or "")
             f_lat = getattr(f, "latitude", None)
             f_lon = getattr(f, "longitude", None)
 
             alt_str = f"{alt:,} ft" if alt else "N/A"
+            heading_str = f"{heading}°" if heading is not None else "N/A"
             phase = flight_phase(vs)
             color = altitude_color(alt)
+
+            # Journey Details table
+            journey_rows.append({
+                "Preview": image_url,
+                "Airline": airline,
+                "Flight": flight_no,
+                "To": dest,
+            })
+
+            # ETA calculation for descending aircraft
+            eta_str = "N/A"
+            if vs is not None and vs < -100 and alt:
+                eta_min = calc_eta_to_airport(alt, vs)
+                if eta_min and eta_min > 0:
+                    eta_str = f"~{int(eta_min)} min"
+
+            # Technical Intelligence table
+            tech_rows.append({
+                "Flight": flight_no,
+                "Alt (ft)": alt_str,
+                "Speed (kt)": spd if spd else "N/A",
+                "Heading": heading_str,
+                "Est. Descent": eta_str,
+            })
 
             if f_lat and f_lon:
                 d = haversine_km(lat, lon, f_lat, f_lon)
@@ -259,61 +281,171 @@ else:
                         "phase": phase,
                     }
 
-                # Emergency pulse ring
-                if sq in SQUAWK_ALERTS:
-                    folium.CircleMarker(
-                        [f_lat, f_lon],
-                        radius=22,
-                        color="red",
-                        fill=True,
-                        fill_opacity=0.25,
-                        tooltip=f"⚠️ SQUAWK {sq} — {flight_no}",
-                    ).add_to(fmap)
-
-                folium.Marker(
-                    [f_lat, f_lon],
-                    popup=(
-                        f"<b>{airline}</b><br>"
-                        f"Flight: {flight_no}<br>"
-                        f"From: {origin}<br>"
-                        f"To: {dest}<br>"
-                        f"Alt: {alt_str}<br>"
-                        f"Speed: {spd} kts<br>"
-                        f"{phase}"
-                    ),
-                    tooltip=f"{airline} — {flight_no}",
-                    icon=folium.Icon(color=color, icon="plane", prefix="fa"),
-                ).add_to(fmap)
-
-            rows.append({
-                "Airline": airline,
-                "Flight": flight_no,
-                "From": origin,
-                "To": dest,
-                "Altitude": alt_str,
-                "Speed (kts)": spd if spd else "N/A",
-                "Phase": phase,
-            })
+                # Accumulate for heatmap
+                st.session_state.heatmap_points.append([f_lat, f_lon])
 
         # Nearest aircraft callout
         if nearest_info:
             st.info(
-                f"🎯 **Closest Aircraft:** {nearest_info['airline']} ({nearest_info['flight']}) — "
+                f"Closest Aircraft: {nearest_info['airline']} ({nearest_info['flight']}) — "
                 f"**{nearest_info['dist']:.2f} km** away · "
                 f"{nearest_info['alt']} · {nearest_info['phase']}"
             )
 
-        with col_map:
-            st_folium(fmap, width=800, height=500, returned_objects=[], key="flight_map")
+        # Tab interface: Live Radar vs Session Heatmap
+        tab_live, tab_heat = st.tabs(["Live Radar", "Session Heatmap"])
 
-        with col_list:
-            st.write("**Aircraft Details**")
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-            st.markdown("""
+        with tab_live:
+            # Live Map with projected flight paths
+            fmap = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB dark_matter")
+            folium.Marker(
+                [lat, lon],
+                tooltip="You are here",
+                icon=folium.Icon(color="red", icon="user", prefix="fa")
+            ).add_to(fmap)
+            folium.Circle(
+                location=[lat, lon],
+                radius=SEARCH_RADIUS_M,
+                color="#00d4ff",
+                weight=1,
+                fill=True,
+                fill_opacity=0.04,
+            ).add_to(fmap)
+
+            # Airport markers
+            try:
+                raw_airports = fr_api.get_airports()
+                if isinstance(raw_airports, dict):
+                    airport_list = raw_airports.get("airports", [])
+                elif isinstance(raw_airports, list):
+                    airport_list = raw_airports
+                else:
+                    airport_list = []
+
+                for ap in airport_list:
+                    try:
+                        ap_lat = float(ap.latitude)
+                        ap_lon = float(ap.longitude)
+                        if haversine_km(lat, lon, ap_lat, ap_lon) > 20:
+                            continue
+                        iata = getattr(ap, "iata", None) or getattr(ap, "code", "?")
+                        name = getattr(ap, "name", "Airport")
+                        city = getattr(ap, "city", "")
+                        folium.Marker(
+                            [ap_lat, ap_lon],
+                            popup=f"<b>{iata}</b><br>{name}<br>{city}",
+                            tooltip=iata,
+                            icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
+                        ).add_to(fmap)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logging.warning(f"Airport markers failed: {e}")
+
+            # Flight markers with projected paths (B1 feature)
+            for f in flights:
+                f_lat = getattr(f, "latitude", None)
+                f_lon = getattr(f, "longitude", None)
+                heading = getattr(f, "heading", None)
+                spd = getattr(f, "ground_speed", None)
+                alt = getattr(f, "altitude", None)
+                sq = str(getattr(f, "squawk", "") or "")
+                flight_no = getattr(f, "number", None) or getattr(f, "callsign", "?")
+                airline = getattr(f, "airline_name", "Unknown")
+
+                if f_lat and f_lon:
+                    color = altitude_color(alt)
+
+                    # Emergency pulse ring
+                    if sq in SQUAWK_ALERTS:
+                        folium.CircleMarker(
+                            [f_lat, f_lon],
+                            radius=22,
+                            color="red",
+                            fill=True,
+                            fill_opacity=0.25,
+                            tooltip=f"SQUAWK {sq} — {flight_no}",
+                        ).add_to(fmap)
+
+                    # Projected flight path (5-min lookahead)
+                    proj = project_position(f_lat, f_lon, heading, spd, minutes=5)
+                    if proj:
+                        folium.PolyLine(
+                            [[f_lat, f_lon], proj],
+                            color="cyan",
+                            weight=2,
+                            opacity=0.6,
+                            dash_array="5, 5",
+                        ).add_to(fmap)
+                        folium.CircleMarker(
+                            proj,
+                            radius=6,
+                            color="cyan",
+                            fill=True,
+                            fill_opacity=0.5,
+                            tooltip=f"Projected: {flight_no} in 5 min",
+                        ).add_to(fmap)
+
+                    folium.Marker(
+                        [f_lat, f_lon],
+                        popup=(
+                            f"<b>{airline}</b><br>"
+                            f"Flight: {flight_no}<br>"
+                            f"Alt: {f'{alt:,} ft' if alt else 'N/A'}<br>"
+                            f"Speed: {spd} kts"
+                        ),
+                        tooltip=f"{airline} — {flight_no}",
+                        icon=folium.Icon(color=color, icon="plane", prefix="fa"),
+                    ).add_to(fmap)
+
+            st_folium(fmap, width=1400, height=600, returned_objects=[], key="flight_map")
+
+        with tab_heat:
+            # Session traffic heatmap (B2 feature)
+            if st.session_state.heatmap_points:
+                hmap = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB dark_matter")
+                folium.Marker([lat, lon], tooltip="You", icon=folium.Icon(color="red", icon="user", prefix="fa")).add_to(hmap)
+
+                folium.plugins.HeatMap(
+                    st.session_state.heatmap_points,
+                    radius=50,
+                    blur=15,
+                    max_zoom=1,
+                ).add_to(hmap)
+
+                st_folium(hmap, width=1400, height=600, returned_objects=[], key="heatmap")
+                st.caption(f"Heatmap: {len(st.session_state.heatmap_points)} aircraft positions recorded this session")
+            else:
+                st.info("Heatmap will populate after a few radar updates. Refresh and wait to see traffic density.")
+
+        st.divider()
+
+        # Journey Details Table
+        st.subheader("Journey Details")
+        st.dataframe(
+            pd.DataFrame(journey_rows),
+            column_config={
+                "Preview": st.column_config.ImageColumn("Preview", width="small"),
+            },
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        st.divider()
+
+        # Technical Intelligence Table
+        st.subheader("Technical Intelligence")
+        st.dataframe(pd.DataFrame(tech_rows), hide_index=True, use_container_width=True)
+
+        st.markdown("""
 **Altitude Color Key:**
-🟢 `< 3,000 ft` — Final approach / departure
-🟠 `3K – 15K ft` — Climbing or descending
-🔴 `> 15,000 ft` — High cruise
+[LOW] `< 3,000 ft` — Final approach / departure
+[MEDIUM] `3K – 15K ft` — Climbing or descending
+[HIGH] `> 15,000 ft` — High cruise
+
+**Heading:** Compass bearing in degrees (0° = North)
+
+**Projected Path:** Dashed cyan line shows where the aircraft will be in 5 minutes
 """)
 
     else:
@@ -324,7 +456,7 @@ else:
         seconds = int(refresh_interval.rstrip("s"))
         ph = st.empty()
         for i in range(seconds, 0, -1):
-            ph.caption(f"🔄 Refreshing in {i}s...")
+            ph.caption(f"Refreshing in {i}s...")
             time.sleep(1)
         ph.empty()
         st.rerun()
