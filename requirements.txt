@@ -1,9 +1,7 @@
 streamlit
-FlightRadarAPI
-beautifulsoup4
-streamlit-js-eval
+FlightRadar24
 folium
 streamlit-folium
 requests
 pandas
-streamlit-autorefresh
+streamlit-js-eval
