@@ -1,6 +1,5 @@
 import logging
 import math
-import time
 
 import folium
 import folium.plugins
@@ -8,6 +7,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from FlightRadar24 import FlightRadar24API
+from streamlit_autorefresh import st_autorefresh
 from streamlit_folium import st_folium
 from streamlit_js_eval import get_geolocation
 
@@ -125,7 +125,14 @@ if not WEATHER_API_KEY:
 
 # Sidebar
 st.sidebar.title("Controls")
-refresh_interval = st.sidebar.selectbox("Auto-Refresh", ["Manual", "15s", "30s", "60s"], index=0)
+refresh_interval = st.sidebar.selectbox("Auto-Refresh", ["Manual", "15s", "30s", "60s"], index=2)
+
+# Non-blocking auto-refresh (smooth live updates without UI freeze)
+_refresh_map = {"Manual": None, "15s": 15, "30s": 30, "60s": 60}
+_refresh_secs = _refresh_map.get(refresh_interval)
+if _refresh_secs:
+    st_autorefresh(interval=_refresh_secs * 1000, key="data_refresh")
+
 st.sidebar.divider()
 density_slot = st.sidebar.empty()
 st.sidebar.title("About")
@@ -451,12 +458,6 @@ else:
     else:
         st.warning("The sky is quiet! No flights detected within 10 km.")
 
-    # Auto-refresh countdown
+    # Live update indicator
     if refresh_interval != "Manual":
-        seconds = int(refresh_interval.rstrip("s"))
-        ph = st.empty()
-        for i in range(seconds, 0, -1):
-            ph.caption(f"Refreshing in {i}s...")
-            time.sleep(1)
-        ph.empty()
-        st.rerun()
+        st.caption(f"Live data — auto-refreshing every {refresh_interval}")
