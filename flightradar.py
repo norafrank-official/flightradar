@@ -196,8 +196,6 @@ _refresh_map = {"5s": 5, "10s": 10, "30s": 30, "60s": 60, "Manual": None}
 refresh_seconds = _refresh_map[refresh_choice]
 
 st.sidebar.divider()
-density_slot = st.sidebar.empty()
-cache_slot = st.sidebar.empty()
 
 st.sidebar.title("About")
 st.sidebar.info("ADS-B transponder data + meteorological data for close-range spotting (~10 km).")
@@ -251,11 +249,14 @@ else:
             st.error("Could not reach FlightRadar24. Retrying on next tick.")
             flights = []
 
-        # Sky density badge
+        # Status indicators (live, inside fragment)
         count = len(flights) if flights else 0
         status_label = "OK" if count <= 3 else ("BUSY" if count <= 8 else "CRITICAL")
-        density_slot.markdown(f"### Aircraft in Radius: **{count}** [{status_label}]")
-        cache_slot.caption(f"Detail cache: {len(st.session_state.flight_details_cache)} flights")
+        cache_size = len(st.session_state.flight_details_cache)
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Aircraft in Radius", count, delta=status_label, delta_color="off")
+        s2.metric("Detail Cache (flights)", cache_size)
+        s3.metric("Refresh Interval", f"{refresh_seconds}s" if refresh_seconds else "Manual")
 
         if not flights:
             st.warning("The sky is quiet. No flights detected within 10 km.")
