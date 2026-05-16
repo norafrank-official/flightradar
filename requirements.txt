@@ -1,7 +1,4 @@
-streamlit
-FlightRadar24
-folium
-streamlit-folium
-requests
-pandas
-streamlit-js-eval
+folium==0.14.0
+streamlit-folium==0.11.1
+streamlit-js-eval==0.1.7
+FlightRadarAPI==1.4.0
