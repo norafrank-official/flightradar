@@ -7,7 +7,7 @@ import folium.plugins
 import pandas as pd
 import requests
 import streamlit as st
-from FlightRadar24 import FlightRadar24API
+from FlightRadarAPI import FlightRadarAPI
 from streamlit_folium import st_folium
 from streamlit_js_eval import get_geolocation
 
@@ -234,7 +234,7 @@ else:
     st.divider()
 
     # 3. Init FlightRadar API (cheap, reusable across reruns)
-    fr_api = FlightRadar24API()
+    fr_api = FlightRadarAPI()
 
     # --- LIVE FRAGMENT (auto-updating every N seconds) ---
 
