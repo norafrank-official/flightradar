@@ -90,10 +90,9 @@ def calc_eta_to_airport(altitude_ft, vertical_speed_ft_per_min):
 def _flight_key(flight):
     return getattr(flight, "id", None) or getattr(flight, "callsign", None)
 
-def get_cached_details(fr_api, flight):
+def get_cached_details(fr_api, flight, cache):
     """Fetch + cache slow-changing flight details (airline, route, aircraft image)."""
     fid = _flight_key(flight)
-    cache = st.session_state.flight_details_cache
     if fid in cache:
         try:
             flight.set_flight_details(cache[fid]["raw"])
@@ -138,11 +137,12 @@ def get_cached_details(fr_api, flight):
 
 def warm_cache_parallel(fr_api, flights):
     """Fetch details for any uncached flights in parallel (5 workers)."""
-    uncached = [f for f in flights if _flight_key(f) not in st.session_state.flight_details_cache]
+    cache = st.session_state.flight_details_cache
+    uncached = [f for f in flights if _flight_key(f) not in cache]
     if not uncached:
         return
     with ThreadPoolExecutor(max_workers=5) as pool:
-        list(pool.map(lambda f: get_cached_details(fr_api, f), uncached))
+        list(pool.map(lambda f: get_cached_details(fr_api, f, cache), uncached))
 
 # --- WEATHER ---
 
@@ -282,9 +282,10 @@ else:
         nearest_km = float("inf")
         nearest_info = None
         flight_positions = []
+        cache = st.session_state.flight_details_cache
 
         for f in flights:
-            d = get_cached_details(fr_api, f)
+            d = get_cached_details(fr_api, f, cache)
 
             alt = getattr(f, "altitude", None)
             vs = getattr(f, "vertical_speed", None)
