@@ -176,6 +176,18 @@ if "flight_details_cache" not in st.session_state:
     st.session_state.flight_details_cache = {}
 if "heatmap_points" not in st.session_state:
     st.session_state.heatmap_points = []
+if "live_count" not in st.session_state:
+    st.session_state.live_count = 0
+if "live_squawk_alerts" not in st.session_state:
+    st.session_state.live_squawk_alerts = []
+if "live_journey_rows" not in st.session_state:
+    st.session_state.live_journey_rows = []
+if "live_tech_rows" not in st.session_state:
+    st.session_state.live_tech_rows = []
+if "live_flight_positions" not in st.session_state:
+    st.session_state.live_flight_positions = []
+if "live_nearest_info" not in st.session_state:
+    st.session_state.live_nearest_info = None
 
 # --- APP ---
 
@@ -238,65 +250,48 @@ else:
 
     # --- LIVE FRAGMENT (auto-updating every N seconds) ---
 
-    def render_live_panel(lat, lon, fr_api, refresh_seconds):
-        st.subheader("Live Radar (10 km Radius)")
-
+    def _fetch_and_process(lat: float, lon: float, fr_api) -> bool:
+        """Fetch flights, process all display data, write results to session_state."""
         try:
             bounds = fr_api.get_bounds_by_point(lat, lon, SEARCH_RADIUS_M)
             flights = fr_api.get_flights(bounds=bounds)
         except Exception as e:
             logging.warning(f"FlightRadar24 fetch failed: {e}")
             st.error("Could not reach FlightRadar24. Retrying on next tick.")
-            flights = []
+            return False
 
-        # Status indicators (live, inside fragment)
         count = len(flights) if flights else 0
-        status_label = "OK" if count <= 3 else ("BUSY" if count <= 8 else "CRITICAL")
-        cache_size = len(st.session_state.flight_details_cache)
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Aircraft in Radius", count, delta=status_label, delta_color="off")
-        s2.metric("Detail Cache (flights)", cache_size)
-        s3.metric("Refresh Interval", f"{refresh_seconds}s" if refresh_seconds else "Manual")
+        st.session_state.live_count = count
 
         if not flights:
-            st.warning("The sky is quiet. No flights detected within 10 km.")
-            return
+            st.session_state.live_squawk_alerts = []
+            st.session_state.live_journey_rows = []
+            st.session_state.live_tech_rows = []
+            st.session_state.live_flight_positions = []
+            st.session_state.live_nearest_info = None
+            return True
 
-        # Parallel warm-up for any new flight IDs
         warm_cache_parallel(fr_api, flights)
-
-        # Squawk alert scan (always check on every tick)
-        for f in flights:
-            sq = str(getattr(f, "squawk", "") or "")
-            if sq in SQUAWK_ALERTS:
-                msg, level = SQUAWK_ALERTS[sq]
-                cs = getattr(f, "callsign", "UNKNOWN")
-                if level == "error":
-                    st.error(f"{msg} — Aircraft: **{cs}**")
-                else:
-                    st.warning(f"{msg} — Aircraft: **{cs}**")
-
-        # Build row data
-        journey_rows = []
-        tech_rows = []
-        nearest_km = float("inf")
-        nearest_info = None
-        flight_positions = []
         cache = st.session_state.flight_details_cache
 
-        for f in flights:
-            d = get_cached_details(fr_api, f, cache)
+        squawk_alerts, journey_rows, tech_rows, flight_positions = [], [], [], []
+        nearest_km, nearest_info = float("inf"), None
 
+        for f in flights:
+            sq = str(getattr(f, "squawk", "") or "")
+            cs = getattr(f, "callsign", "UNKNOWN")
+            if sq in SQUAWK_ALERTS:
+                msg, level = SQUAWK_ALERTS[sq]
+                squawk_alerts.append((msg, level, cs))
+
+            d = get_cached_details(fr_api, f, cache)
             alt = getattr(f, "altitude", None)
             vs = getattr(f, "vertical_speed", None)
             spd = getattr(f, "ground_speed", None)
             heading = getattr(f, "heading", None)
             f_lat = getattr(f, "latitude", None)
             f_lon = getattr(f, "longitude", None)
-            sq = str(getattr(f, "squawk", "") or "")
-
             alt_str = f"{alt:,} ft" if alt else "N/A"
-            heading_str = f"{heading}°" if heading is not None else "N/A"
             phase = flight_phase(vs)
 
             eta_str = "N/A"
@@ -311,12 +306,11 @@ else:
                 "Flight": d["flight_no"],
                 "To": d["dest"],
             })
-
             tech_rows.append({
                 "Flight": d["flight_no"],
                 "Alt (ft)": alt_str,
                 "Speed (kt)": spd if spd else "N/A",
-                "Heading": heading_str,
+                "Heading": f"{heading}°" if heading is not None else "N/A",
                 "Phase": phase,
                 "Est. Descent": eta_str,
             })
@@ -335,117 +329,84 @@ else:
                 st.session_state.heatmap_points.append([f_lat, f_lon])
                 flight_positions.append({
                     "lat": f_lat, "lon": f_lon, "alt": alt, "spd": spd,
-                    "heading": heading, "sq": sq, "flight_no": d["flight_no"],
-                    "airline": d["airline"],
+                    "heading": heading, "sq": sq,
+                    "flight_no": d["flight_no"], "airline": d["airline"],
                 })
 
-        if nearest_info:
-            st.info(
-                f"Closest Aircraft: {nearest_info['airline']} ({nearest_info['flight']}) — "
-                f"**{nearest_info['dist']:.2f} km** away · "
-                f"{nearest_info['alt']} · {nearest_info['phase']}"
-            )
+        st.session_state.live_squawk_alerts = squawk_alerts
+        st.session_state.live_journey_rows = journey_rows
+        st.session_state.live_tech_rows = tech_rows
+        st.session_state.live_flight_positions = flight_positions
+        st.session_state.live_nearest_info = nearest_info
+        return True
 
-        # Tabs: Live Radar / Session Heatmap
-        tab_live, tab_heat = st.tabs(["Live Radar", "Session Heatmap"])
+    def _render_live_map(lat: float, lon: float) -> None:
+        fmap = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB dark_matter")
+        folium.Marker(
+            [lat, lon],
+            tooltip="You are here",
+            icon=folium.Icon(color="red", icon="user", prefix="fa"),
+        ).add_to(fmap)
+        folium.Circle(
+            location=[lat, lon],
+            radius=SEARCH_RADIUS_M,
+            color="#00d4ff",
+            weight=1,
+            fill=True,
+            fill_opacity=0.04,
+        ).add_to(fmap)
+        for fp in st.session_state.live_flight_positions:
+            color = altitude_color(fp["alt"])
+            if fp["sq"] in SQUAWK_ALERTS:
+                folium.CircleMarker(
+                    [fp["lat"], fp["lon"]],
+                    radius=22, color="red", fill=True, fill_opacity=0.25,
+                    tooltip=f"SQUAWK {fp['sq']} — {fp['flight_no']}",
+                ).add_to(fmap)
+            proj = project_position(fp["lat"], fp["lon"], fp["heading"], fp["spd"], minutes=5)
+            if proj:
+                folium.PolyLine(
+                    [[fp["lat"], fp["lon"]], proj],
+                    color="cyan", weight=2, opacity=0.6, dash_array="5, 5",
+                ).add_to(fmap)
+                folium.CircleMarker(
+                    proj, radius=6, color="cyan", fill=True, fill_opacity=0.5,
+                    tooltip=f"Projected: {fp['flight_no']} in 5 min",
+                ).add_to(fmap)
+            alt_text = f"{fp['alt']:,} ft" if fp["alt"] else "N/A"
+            folium.Marker(
+                [fp["lat"], fp["lon"]],
+                popup=(
+                    f"<b>{fp['airline']}</b><br>"
+                    f"Flight: {fp['flight_no']}<br>"
+                    f"Alt: {alt_text}<br>"
+                    f"Speed: {fp['spd']} kts"
+                ),
+                tooltip=f"{fp['airline']} — {fp['flight_no']}",
+                icon=folium.Icon(color=color, icon="plane", prefix="fa"),
+            ).add_to(fmap)
+        st_folium(fmap, width=1400, height=600, returned_objects=[], key="flight_map")
 
-        with tab_live:
-            fmap = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB dark_matter")
+    def _render_heatmap_tab(lat: float, lon: float) -> None:
+        if st.session_state.heatmap_points:
+            hmap = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB dark_matter")
             folium.Marker(
                 [lat, lon],
-                tooltip="You are here",
+                tooltip="You",
                 icon=folium.Icon(color="red", icon="user", prefix="fa"),
-            ).add_to(fmap)
-            folium.Circle(
-                location=[lat, lon],
-                radius=SEARCH_RADIUS_M,
-                color="#00d4ff",
-                weight=1,
-                fill=True,
-                fill_opacity=0.04,
-            ).add_to(fmap)
+            ).add_to(hmap)
+            folium.plugins.HeatMap(
+                st.session_state.heatmap_points, radius=50, blur=15, max_zoom=1,
+            ).add_to(hmap)
+            st_folium(hmap, width=1400, height=600, returned_objects=[], key="heatmap")
+            st.caption(f"Heatmap: {len(st.session_state.heatmap_points)} aircraft positions recorded this session")
+        else:
+            st.info("Heatmap will populate after a few radar updates.")
 
-            for fp in flight_positions:
-                color = altitude_color(fp["alt"])
+    # --- LIVE MODE: isolated fragments so each region updates without full-page flicker ---
+    st.subheader("Live Radar (10 km Radius)")
 
-                if fp["sq"] in SQUAWK_ALERTS:
-                    folium.CircleMarker(
-                        [fp["lat"], fp["lon"]],
-                        radius=22,
-                        color="red",
-                        fill=True,
-                        fill_opacity=0.25,
-                        tooltip=f"SQUAWK {fp['sq']} — {fp['flight_no']}",
-                    ).add_to(fmap)
-
-                proj = project_position(fp["lat"], fp["lon"], fp["heading"], fp["spd"], minutes=5)
-                if proj:
-                    folium.PolyLine(
-                        [[fp["lat"], fp["lon"]], proj],
-                        color="cyan",
-                        weight=2,
-                        opacity=0.6,
-                        dash_array="5, 5",
-                    ).add_to(fmap)
-                    folium.CircleMarker(
-                        proj,
-                        radius=6,
-                        color="cyan",
-                        fill=True,
-                        fill_opacity=0.5,
-                        tooltip=f"Projected: {fp['flight_no']} in 5 min",
-                    ).add_to(fmap)
-
-                alt_text = f"{fp['alt']:,} ft" if fp['alt'] else "N/A"
-                folium.Marker(
-                    [fp["lat"], fp["lon"]],
-                    popup=(
-                        f"<b>{fp['airline']}</b><br>"
-                        f"Flight: {fp['flight_no']}<br>"
-                        f"Alt: {alt_text}<br>"
-                        f"Speed: {fp['spd']} kts"
-                    ),
-                    tooltip=f"{fp['airline']} — {fp['flight_no']}",
-                    icon=folium.Icon(color=color, icon="plane", prefix="fa"),
-                ).add_to(fmap)
-
-            st_folium(fmap, width=1400, height=600, returned_objects=[], key="flight_map")
-
-        with tab_heat:
-            if st.session_state.heatmap_points:
-                hmap = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB dark_matter")
-                folium.Marker(
-                    [lat, lon],
-                    tooltip="You",
-                    icon=folium.Icon(color="red", icon="user", prefix="fa"),
-                ).add_to(hmap)
-                folium.plugins.HeatMap(
-                    st.session_state.heatmap_points,
-                    radius=50,
-                    blur=15,
-                    max_zoom=1,
-                ).add_to(hmap)
-                st_folium(hmap, width=1400, height=600, returned_objects=[], key="heatmap")
-                st.caption(f"Heatmap: {len(st.session_state.heatmap_points)} aircraft positions recorded this session")
-            else:
-                st.info("Heatmap will populate after a few radar updates.")
-
-        st.divider()
-
-        st.subheader("Journey Details")
-        st.dataframe(
-            pd.DataFrame(journey_rows),
-            column_config={"Preview": st.column_config.ImageColumn("Preview", width="small")},
-            hide_index=True,
-            use_container_width=True,
-        )
-
-        st.divider()
-
-        st.subheader("Technical Intelligence")
-        st.dataframe(pd.DataFrame(tech_rows), hide_index=True, use_container_width=True)
-
-        st.markdown("""
+    _LEGEND = """
 **Altitude Color Key:**
 [LOW] `< 3,000 ft` — Final approach / departure
 [MEDIUM] `3K – 15K ft` — Climbing or descending
@@ -453,15 +414,108 @@ else:
 
 **Heading:** Compass bearing in degrees (0° = North)
 **Projected Path:** Dashed cyan line — projected position in 5 minutes
-""")
+"""
 
-    # Decide between live fragment (auto-tick) or static render (manual mode)
     if refresh_seconds:
         @st.fragment(run_every=refresh_seconds)
-        def _live_panel():
-            render_live_panel(lat, lon, fr_api, refresh_seconds)
-        _live_panel()
+        def _metrics_frag():
+            ok = _fetch_and_process(lat, lon, fr_api)
+            if not ok:
+                return
+            count = st.session_state.live_count
+            status_label = "OK" if count <= 3 else ("BUSY" if count <= 8 else "CRITICAL")
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Aircraft in Radius", count, delta=status_label, delta_color="off")
+            s2.metric("Detail Cache (flights)", len(st.session_state.flight_details_cache))
+            s3.metric("Refresh Interval", f"{refresh_seconds}s")
+            if count == 0:
+                st.warning("The sky is quiet. No flights detected within 10 km.")
+                return
+            for msg, level, cs in st.session_state.live_squawk_alerts:
+                if level == "error":
+                    st.error(f"{msg} — Aircraft: **{cs}**")
+                else:
+                    st.warning(f"{msg} — Aircraft: **{cs}**")
+            nearest = st.session_state.live_nearest_info
+            if nearest:
+                st.info(
+                    f"Closest Aircraft: {nearest['airline']} ({nearest['flight']}) — "
+                    f"**{nearest['dist']:.2f} km** away · {nearest['alt']} · {nearest['phase']}"
+                )
+
+        @st.fragment(run_every=refresh_seconds)
+        def _map_frag():
+            _render_live_map(lat, lon)
+
+        @st.fragment(run_every=refresh_seconds)
+        def _heat_frag():
+            _render_heatmap_tab(lat, lon)
+
+        @st.fragment(run_every=refresh_seconds)
+        def _tables_frag():
+            journey_rows = st.session_state.live_journey_rows
+            tech_rows = st.session_state.live_tech_rows
+            if not journey_rows:
+                return
+            st.subheader("Journey Details")
+            st.dataframe(
+                pd.DataFrame(journey_rows),
+                column_config={"Preview": st.column_config.ImageColumn("Preview", width="small")},
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.divider()
+            st.subheader("Technical Intelligence")
+            st.dataframe(pd.DataFrame(tech_rows), hide_index=True, use_container_width=True)
+            st.markdown(_LEGEND)
+
+        _metrics_frag()
+        tab_live, tab_heat = st.tabs(["Live Radar", "Session Heatmap"])
+        with tab_live:
+            _map_frag()
+        with tab_heat:
+            _heat_frag()
+        st.divider()
+        _tables_frag()
         st.caption(f"Live mode — auto-refreshing every {refresh_seconds}s. Map & tables update in place.")
+
     else:
-        render_live_panel(lat, lon, fr_api, refresh_seconds)
+        _fetch_and_process(lat, lon, fr_api)
+        count = st.session_state.live_count
+        status_label = "OK" if count <= 3 else ("BUSY" if count <= 8 else "CRITICAL")
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Aircraft in Radius", count, delta=status_label, delta_color="off")
+        s2.metric("Detail Cache (flights)", len(st.session_state.flight_details_cache))
+        s3.metric("Refresh Interval", "Manual")
+        if count == 0:
+            st.warning("The sky is quiet. No flights detected within 10 km.")
+        else:
+            for msg, level, cs in st.session_state.live_squawk_alerts:
+                if level == "error":
+                    st.error(f"{msg} — Aircraft: **{cs}**")
+                else:
+                    st.warning(f"{msg} — Aircraft: **{cs}**")
+            nearest = st.session_state.live_nearest_info
+            if nearest:
+                st.info(
+                    f"Closest Aircraft: {nearest['airline']} ({nearest['flight']}) — "
+                    f"**{nearest['dist']:.2f} km** away · {nearest['alt']} · {nearest['phase']}"
+                )
+            tab_live, tab_heat = st.tabs(["Live Radar", "Session Heatmap"])
+            with tab_live:
+                _render_live_map(lat, lon)
+            with tab_heat:
+                _render_heatmap_tab(lat, lon)
+            st.divider()
+            st.subheader("Journey Details")
+            st.dataframe(
+                pd.DataFrame(st.session_state.live_journey_rows),
+                column_config={"Preview": st.column_config.ImageColumn("Preview", width="small")},
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.divider()
+            st.subheader("Technical Intelligence")
+            st.dataframe(pd.DataFrame(st.session_state.live_tech_rows), hide_index=True, use_container_width=True)
+            st.markdown(_LEGEND)
         st.caption("Manual mode — reload the page to refresh.")
