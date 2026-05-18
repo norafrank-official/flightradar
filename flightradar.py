@@ -7,7 +7,7 @@ import folium.plugins
 import pandas as pd
 import requests
 import streamlit as st
-from FlightRadarAPI import FlightRadar24API
+from FlightRadar24 import FlightRadar24API
 from streamlit_folium import st_folium
 from streamlit_js_eval import get_geolocation
 
