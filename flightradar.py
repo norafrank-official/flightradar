@@ -92,13 +92,13 @@ _PS_HEADERS = {
     "Accept": "application/json",
 }
 
-def get_aircraft_image(registration: str) -> str | None:
-    """Return a thumbnail URL for an aircraft by registration via Planespotters (free, no auth)."""
+def get_aircraft_image(registration: str, image_cache: dict) -> str | None:
+    """Return a thumbnail URL for an aircraft by registration via Planespotters (free, no auth).
+    image_cache must be passed explicitly — never access st.session_state inside a thread."""
     if not registration:
         return None
-    cache = st.session_state.setdefault("image_cache", {})
-    if registration in cache:
-        return cache[registration]
+    if registration in image_cache:
+        return image_cache[registration]
     try:
         r = requests.get(
             f"https://api.planespotters.net/pub/photos/reg/{registration}",
@@ -108,20 +108,21 @@ def get_aircraft_image(registration: str) -> str | None:
         if r.status_code == 200:
             photos = r.json().get("photos", [])
             url = photos[0].get("thumbnail", {}).get("src") if photos else None
-            cache[registration] = url
+            image_cache[registration] = url
             return url
     except Exception as e:
         logging.warning(f"Planespotters fetch failed for {registration}: {e}")
-    cache[registration] = None
+    image_cache[registration] = None
     return None
 
 def _flight_key(flight):
     return getattr(flight, "id", None) or getattr(flight, "callsign", None)
 
-def get_cached_details(fr_api, flight):
-    """Fetch + cache slow-changing flight details (airline, route, aircraft image)."""
+def get_cached_details(fr_api, flight, cache: dict, airline_lookup: dict, image_cache: dict):
+    """Fetch + cache flight details.
+    All three dicts are passed explicitly — never read st.session_state inside this
+    function because it is called from ThreadPoolExecutor worker threads."""
     fid = _flight_key(flight)
-    cache = st.session_state.flight_details_cache
     if fid in cache:
         try:
             flight.set_flight_details(cache[fid]["raw"])
@@ -129,7 +130,10 @@ def get_cached_details(fr_api, flight):
             pass
         return cache[fid]
 
-    reg = getattr(flight, "registration", None) or ""
+    reg  = getattr(flight, "registration", None) or ""
+    iata = getattr(flight, "airline_iata",  "") or ""
+    icao = getattr(flight, "airline_icao",  "") or ""
+
     try:
         raw = fr_api.get_flight_details(flight)
         flight.set_flight_details(raw)
@@ -146,44 +150,44 @@ def get_cached_details(fr_api, flight):
         except Exception:
             pass
         if not image_url:
-            image_url = get_aircraft_image(reg)
-        lk = st.session_state.airline_lookup
-        iata = getattr(flight, "airline_iata", "") or ""
-        icao = getattr(flight, "airline_icao", "") or ""
+            image_url = get_aircraft_image(reg, image_cache)
         entry = {
-            "airline":    getattr(flight, "airline_name", None) or lk.get(iata) or lk.get(icao) or iata or "Private/Unknown",
-            "flight_no":  getattr(flight, "number", None) or getattr(flight, "callsign", None) or "N/A",
-            "origin":     getattr(flight, "origin_airport_name", None) or getattr(flight, "origin_airport_iata", None) or "—",
-            "dest":       getattr(flight, "destination_airport_name", None) or getattr(flight, "destination_airport_iata", None) or "—",
-            "image_url":  image_url,
-            "raw":        raw,
+            "airline":   getattr(flight, "airline_name", None) or airline_lookup.get(iata) or airline_lookup.get(icao) or iata or "Private/Unknown",
+            "flight_no": getattr(flight, "number", None) or getattr(flight, "callsign", None) or "N/A",
+            "origin":    getattr(flight, "origin_airport_name", None) or getattr(flight, "origin_airport_iata", None) or "—",
+            "dest":      getattr(flight, "destination_airport_name", None) or getattr(flight, "destination_airport_iata", None) or "—",
+            "image_url": image_url,
+            "raw":       raw,
         }
-        cache[fid] = entry
-        return entry
     except Exception as e:
         logging.warning(f"Detail fetch failed for {fid}: {e}")
         # FR24 detail endpoint blocked — use Planespotters for image, base attrs for text
-        lk = st.session_state.airline_lookup
-        iata = getattr(flight, "airline_iata", "") or ""
-        icao = getattr(flight, "airline_icao", "") or ""
         entry = {
-            "airline":   lk.get(iata) or lk.get(icao) or iata or "—",
+            "airline":   airline_lookup.get(iata) or airline_lookup.get(icao) or iata or "—",
             "flight_no": getattr(flight, "number", None) or getattr(flight, "callsign", None) or "—",
             "origin":    getattr(flight, "origin_airport_iata", None) or "—",
             "dest":      getattr(flight, "destination_airport_iata", None) or "—",
-            "image_url": get_aircraft_image(reg),
+            "image_url": get_aircraft_image(reg, image_cache),
             "raw":       {},
         }
-        cache[fid] = entry
-        return entry
+    cache[fid] = entry
+    return entry
 
 def warm_cache_parallel(fr_api, flights):
-    """Fetch details for any uncached flights in parallel (5 workers)."""
-    uncached = [f for f in flights if _flight_key(f) not in st.session_state.flight_details_cache]
+    """Fetch details for uncached flights in parallel (5 workers).
+    Extracts session_state dicts in the main thread, then passes them into workers
+    as plain Python objects — session_state is not accessible in worker threads."""
+    cache         = st.session_state.flight_details_cache
+    airline_lookup = st.session_state.airline_lookup
+    image_cache   = st.session_state.image_cache
+    uncached = [f for f in flights if _flight_key(f) not in cache]
     if not uncached:
         return
     with ThreadPoolExecutor(max_workers=5) as pool:
-        list(pool.map(lambda f: get_cached_details(fr_api, f), uncached))
+        list(pool.map(
+            lambda f: get_cached_details(fr_api, f, cache, airline_lookup, image_cache),
+            uncached,
+        ))
 
 # --- WEATHER ---
 
@@ -217,6 +221,8 @@ if "flight_details_cache" not in st.session_state:
     st.session_state.flight_details_cache = {}
 if "airline_lookup" not in st.session_state:
     st.session_state.airline_lookup = {}      # populated once on first run
+if "image_cache" not in st.session_state:
+    st.session_state.image_cache = {}         # keyed by registration, never expires
 if "heatmap_points" not in st.session_state:
     st.session_state.heatmap_points = []
 if "live_count" not in st.session_state:
@@ -331,6 +337,11 @@ else:
         # Parallel warm-up for any new flight IDs (5 workers)
         warm_cache_parallel(fr_api, flights)
 
+        # Extract dicts once in main thread for the loop below
+        cache          = st.session_state.flight_details_cache
+        airline_lookup = st.session_state.airline_lookup
+        image_cache    = st.session_state.image_cache
+
         squawk_alerts, journey_rows, tech_rows, flight_positions = [], [], [], []
         nearest_km, nearest_info = float("inf"), None
 
@@ -343,7 +354,7 @@ else:
             f_lat   = getattr(f, "latitude", None)
             f_lon   = getattr(f, "longitude", None)
 
-            d = get_cached_details(fr_api, f)
+            d = get_cached_details(fr_api, f, cache, airline_lookup, image_cache)
 
             alt_str = f"{alt:,} ft" if alt else "N/A"
             phase   = flight_phase(vs)
