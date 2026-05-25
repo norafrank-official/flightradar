@@ -87,12 +87,41 @@ def calc_eta_to_airport(altitude_ft, vertical_speed_ft_per_min):
 
 # --- CACHED DETAIL FETCHING ---
 
+_PS_HEADERS = {
+    "User-Agent": "SkyWatcherPro/1.0 (+https://github.com/skywatcher)",
+    "Accept": "application/json",
+}
+
+def get_aircraft_image(registration: str) -> str | None:
+    """Return a thumbnail URL for an aircraft by registration via Planespotters (free, no auth)."""
+    if not registration:
+        return None
+    cache = st.session_state.setdefault("image_cache", {})
+    if registration in cache:
+        return cache[registration]
+    try:
+        r = requests.get(
+            f"https://api.planespotters.net/pub/photos/reg/{registration}",
+            headers=_PS_HEADERS,
+            timeout=10,
+        )
+        if r.status_code == 200:
+            photos = r.json().get("photos", [])
+            url = photos[0].get("thumbnail", {}).get("src") if photos else None
+            cache[registration] = url
+            return url
+    except Exception as e:
+        logging.warning(f"Planespotters fetch failed for {registration}: {e}")
+    cache[registration] = None
+    return None
+
 def _flight_key(flight):
     return getattr(flight, "id", None) or getattr(flight, "callsign", None)
 
-def get_cached_details(fr_api, flight, cache):
+def get_cached_details(fr_api, flight):
     """Fetch + cache slow-changing flight details (airline, route, aircraft image)."""
     fid = _flight_key(flight)
+    cache = st.session_state.flight_details_cache
     if fid in cache:
         try:
             flight.set_flight_details(cache[fid]["raw"])
@@ -100,9 +129,11 @@ def get_cached_details(fr_api, flight, cache):
             pass
         return cache[fid]
 
+    reg = getattr(flight, "registration", None) or ""
     try:
         raw = fr_api.get_flight_details(flight)
         flight.set_flight_details(raw)
+        # Try FR24 image first, fall back to Planespotters
         image_url = None
         try:
             thumbs = raw.get("aircraft", {}).get("images", {}).get("thumbnails", [])
@@ -114,35 +145,45 @@ def get_cached_details(fr_api, flight, cache):
                     image_url = large[0].get("src")
         except Exception:
             pass
+        if not image_url:
+            image_url = get_aircraft_image(reg)
+        lk = st.session_state.airline_lookup
+        iata = getattr(flight, "airline_iata", "") or ""
+        icao = getattr(flight, "airline_icao", "") or ""
         entry = {
-            "airline": flight.airline_name or "Private/Unknown",
-            "flight_no": flight.number or flight.callsign,
-            "origin": flight.origin_airport_name or "Unknown",
-            "dest": flight.destination_airport_name or "Unknown",
-            "image_url": image_url,
-            "raw": raw,
+            "airline":    getattr(flight, "airline_name", None) or lk.get(iata) or lk.get(icao) or iata or "Private/Unknown",
+            "flight_no":  getattr(flight, "number", None) or getattr(flight, "callsign", None) or "N/A",
+            "origin":     getattr(flight, "origin_airport_name", None) or getattr(flight, "origin_airport_iata", None) or "—",
+            "dest":       getattr(flight, "destination_airport_name", None) or getattr(flight, "destination_airport_iata", None) or "—",
+            "image_url":  image_url,
+            "raw":        raw,
         }
         cache[fid] = entry
         return entry
     except Exception as e:
         logging.warning(f"Detail fetch failed for {fid}: {e}")
-        return {
-            "airline": "N/A",
-            "flight_no": getattr(flight, "callsign", "N/A"),
-            "origin": "N/A",
-            "dest": "N/A",
-            "image_url": None,
-            "raw": {},
+        # FR24 detail endpoint blocked — use Planespotters for image, base attrs for text
+        lk = st.session_state.airline_lookup
+        iata = getattr(flight, "airline_iata", "") or ""
+        icao = getattr(flight, "airline_icao", "") or ""
+        entry = {
+            "airline":   lk.get(iata) or lk.get(icao) or iata or "—",
+            "flight_no": getattr(flight, "number", None) or getattr(flight, "callsign", None) or "—",
+            "origin":    getattr(flight, "origin_airport_iata", None) or "—",
+            "dest":      getattr(flight, "destination_airport_iata", None) or "—",
+            "image_url": get_aircraft_image(reg),
+            "raw":       {},
         }
+        cache[fid] = entry
+        return entry
 
 def warm_cache_parallel(fr_api, flights):
     """Fetch details for any uncached flights in parallel (5 workers)."""
-    cache = st.session_state.flight_details_cache
-    uncached = [f for f in flights if _flight_key(f) not in cache]
+    uncached = [f for f in flights if _flight_key(f) not in st.session_state.flight_details_cache]
     if not uncached:
         return
     with ThreadPoolExecutor(max_workers=5) as pool:
-        list(pool.map(lambda f: get_cached_details(fr_api, f, cache), uncached))
+        list(pool.map(lambda f: get_cached_details(fr_api, f), uncached))
 
 # --- WEATHER ---
 
@@ -174,6 +215,8 @@ def get_spotting_advice(w: dict) -> tuple:
 
 if "flight_details_cache" not in st.session_state:
     st.session_state.flight_details_cache = {}
+if "airline_lookup" not in st.session_state:
+    st.session_state.airline_lookup = {}      # populated once on first run
 if "heatmap_points" not in st.session_state:
     st.session_state.heatmap_points = []
 if "live_count" not in st.session_state:
@@ -248,10 +291,24 @@ else:
     # 3. Init FlightRadar API (cheap, reusable across reruns)
     fr_api = FlightRadar24API()
 
-    # --- LIVE FRAGMENT (auto-updating every N seconds) ---
+    # 4. Build airline lookup once per session (2 000+ airlines, no auth needed)
+    if not st.session_state.airline_lookup:
+        try:
+            raw_airlines = fr_api.get_airlines()
+            lk = {}
+            for a in raw_airlines:
+                if a.get("IATA"):
+                    lk[a["IATA"]] = a["Name"]
+                if a.get("ICAO"):
+                    lk[a["ICAO"]] = a["Name"]
+            st.session_state.airline_lookup = lk
+        except Exception as e:
+            logging.warning(f"Airline lookup fetch failed: {e}")
+
+    # --- HELPERS ---
 
     def _fetch_and_process(lat: float, lon: float, fr_api) -> bool:
-        """Fetch flights, process all display data, write results to session_state."""
+        """Fetch flights, warm detail cache in parallel, write all display data to session_state."""
         try:
             bounds = fr_api.get_bounds_by_point(lat, lon, SEARCH_RADIUS_M)
             flights = fr_api.get_flights(bounds=bounds)
@@ -271,28 +328,29 @@ else:
             st.session_state.live_nearest_info = None
             return True
 
+        # Parallel warm-up for any new flight IDs (5 workers)
         warm_cache_parallel(fr_api, flights)
-        cache = st.session_state.flight_details_cache
 
         squawk_alerts, journey_rows, tech_rows, flight_positions = [], [], [], []
         nearest_km, nearest_info = float("inf"), None
 
         for f in flights:
-            sq = str(getattr(f, "squawk", "") or "")
-            cs = getattr(f, "callsign", "UNKNOWN")
+            sq      = str(getattr(f, "squawk", "") or "")
+            alt     = getattr(f, "altitude", None)
+            vs      = getattr(f, "vertical_speed", None)
+            spd     = getattr(f, "ground_speed", None)
+            heading = getattr(f, "heading", None)
+            f_lat   = getattr(f, "latitude", None)
+            f_lon   = getattr(f, "longitude", None)
+
+            d = get_cached_details(fr_api, f)
+
+            alt_str = f"{alt:,} ft" if alt else "N/A"
+            phase   = flight_phase(vs)
+
             if sq in SQUAWK_ALERTS:
                 msg, level = SQUAWK_ALERTS[sq]
-                squawk_alerts.append((msg, level, cs))
-
-            d = get_cached_details(fr_api, f, cache)
-            alt = getattr(f, "altitude", None)
-            vs = getattr(f, "vertical_speed", None)
-            spd = getattr(f, "ground_speed", None)
-            heading = getattr(f, "heading", None)
-            f_lat = getattr(f, "latitude", None)
-            f_lon = getattr(f, "longitude", None)
-            alt_str = f"{alt:,} ft" if alt else "N/A"
-            phase = flight_phase(vs)
+                squawk_alerts.append((msg, level, getattr(f, "callsign", "UNKNOWN")))
 
             eta_str = "N/A"
             if vs is not None and vs < -100 and alt:
@@ -303,15 +361,16 @@ else:
             journey_rows.append({
                 "Preview": d["image_url"],
                 "Airline": d["airline"],
-                "Flight": d["flight_no"],
-                "To": d["dest"],
+                "Flight":  d["flight_no"],
+                "From":    d["origin"],
+                "To":      d["dest"],
             })
             tech_rows.append({
-                "Flight": d["flight_no"],
-                "Alt (ft)": alt_str,
-                "Speed (kt)": spd if spd else "N/A",
-                "Heading": f"{heading}°" if heading is not None else "N/A",
-                "Phase": phase,
+                "Flight":       d["flight_no"],
+                "Alt (ft)":     alt_str,
+                "Speed (kt)":   spd if spd else "N/A",
+                "Heading":      f"{heading}°" if heading is not None else "N/A",
+                "Phase":        phase,
                 "Est. Descent": eta_str,
             })
 
@@ -321,10 +380,10 @@ else:
                     nearest_km = dist
                     nearest_info = {
                         "airline": d["airline"],
-                        "flight": d["flight_no"],
-                        "dist": dist,
-                        "alt": alt_str,
-                        "phase": phase,
+                        "flight":  d["flight_no"],
+                        "dist":    dist,
+                        "alt":     alt_str,
+                        "phase":   phase,
                     }
                 st.session_state.heatmap_points.append([f_lat, f_lon])
                 flight_positions.append({
@@ -333,11 +392,11 @@ else:
                     "flight_no": d["flight_no"], "airline": d["airline"],
                 })
 
-        st.session_state.live_squawk_alerts = squawk_alerts
-        st.session_state.live_journey_rows = journey_rows
-        st.session_state.live_tech_rows = tech_rows
+        st.session_state.live_squawk_alerts   = squawk_alerts
+        st.session_state.live_journey_rows    = journey_rows
+        st.session_state.live_tech_rows       = tech_rows
         st.session_state.live_flight_positions = flight_positions
-        st.session_state.live_nearest_info = nearest_info
+        st.session_state.live_nearest_info    = nearest_info
         return True
 
     def _render_live_map(lat: float, lon: float) -> None:
@@ -403,8 +462,7 @@ else:
         else:
             st.info("Heatmap will populate after a few radar updates.")
 
-    # --- LIVE MODE: isolated fragments so each region updates without full-page flicker ---
-    st.subheader("Live Radar (10 km Radius)")
+    # --- LIVE MODE: four isolated fragments — each region updates independently, no full-page flicker ---
 
     _LEGEND = """
 **Altitude Color Key:**
@@ -416,6 +474,8 @@ else:
 **Projected Path:** Dashed cyan line — projected position in 5 minutes
 """
 
+    st.subheader("Live Radar (10 km Radius)")
+
     if refresh_seconds:
         @st.fragment(run_every=refresh_seconds)
         def _metrics_frag():
@@ -424,9 +484,10 @@ else:
                 return
             count = st.session_state.live_count
             status_label = "OK" if count <= 3 else ("BUSY" if count <= 8 else "CRITICAL")
+            cache_size = len(st.session_state.flight_details_cache)
             s1, s2, s3 = st.columns(3)
             s1.metric("Aircraft in Radius", count, delta=status_label, delta_color="off")
-            s2.metric("Detail Cache (flights)", len(st.session_state.flight_details_cache))
+            s2.metric("Detail Cache (flights)", cache_size)
             s3.metric("Refresh Interval", f"{refresh_seconds}s")
             if count == 0:
                 st.warning("The sky is quiet. No flights detected within 10 km.")
@@ -454,7 +515,7 @@ else:
         @st.fragment(run_every=refresh_seconds)
         def _tables_frag():
             journey_rows = st.session_state.live_journey_rows
-            tech_rows = st.session_state.live_tech_rows
+            tech_rows    = st.session_state.live_tech_rows
             if not journey_rows:
                 return
             st.subheader("Journey Details")
@@ -483,9 +544,10 @@ else:
         _fetch_and_process(lat, lon, fr_api)
         count = st.session_state.live_count
         status_label = "OK" if count <= 3 else ("BUSY" if count <= 8 else "CRITICAL")
+        cache_size = len(st.session_state.flight_details_cache)
         s1, s2, s3 = st.columns(3)
         s1.metric("Aircraft in Radius", count, delta=status_label, delta_color="off")
-        s2.metric("Detail Cache (flights)", len(st.session_state.flight_details_cache))
+        s2.metric("Detail Cache (flights)", cache_size)
         s3.metric("Refresh Interval", "Manual")
         if count == 0:
             st.warning("The sky is quiet. No flights detected within 10 km.")
