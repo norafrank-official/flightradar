@@ -2,11 +2,14 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 
+import json
+
 import folium
 import folium.plugins
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from FlightRadar24 import FlightRadar24API
 from streamlit_folium import st_folium
 from streamlit_js_eval import get_geolocation
@@ -411,67 +414,161 @@ else:
         return True
 
     def _render_live_map(lat: float, lon: float) -> None:
-        # location= centers the map on the user; no fixed width so it fills the
-        # container and stays centered on every screen size (mobile + desktop)
-        fmap = folium.Map(
-            location=[lat, lon],
-            zoom_start=13,
-            tiles="CartoDB dark_matter",
-        )
-        folium.Marker(
-            [lat, lon],
-            tooltip="You are here",
-            icon=folium.Icon(color="red", icon="user", prefix="fa"),
-        ).add_to(fmap)
-        folium.Circle(
-            location=[lat, lon],
-            radius=SEARCH_RADIUS_M,
-            color="#00d4ff",
-            weight=1,
-            fill=True,
-            fill_opacity=0.04,
-        ).add_to(fmap)
-        for fp in st.session_state.live_flight_positions:
-            color = altitude_color(fp["alt"])
-            if fp["sq"] in SQUAWK_ALERTS:
-                folium.CircleMarker(
-                    [fp["lat"], fp["lon"]],
-                    radius=22, color="red", fill=True, fill_opacity=0.25,
-                    tooltip=f"SQUAWK {fp['sq']} — {fp['flight_no']}",
-                ).add_to(fmap)
-            proj = project_position(fp["lat"], fp["lon"], fp["heading"], fp["spd"], minutes=5)
-            if proj:
-                folium.PolyLine(
-                    [[fp["lat"], fp["lon"]], proj],
-                    color="cyan", weight=2, opacity=0.6, dash_array="5, 5",
-                ).add_to(fmap)
-                folium.CircleMarker(
-                    proj, radius=6, color="cyan", fill=True, fill_opacity=0.5,
-                    tooltip=f"Projected: {fp['flight_no']} in 5 min",
-                ).add_to(fmap)
-            alt_text = f"{fp['alt']:,} ft" if fp["alt"] else "N/A"
-            popup_html = f"""
-                <div style="font-family:monospace;min-width:180px;">
-                    <div style="font-size:15px;font-weight:bold;margin-bottom:4px;">
-                        {fp['flight_no']}
-                    </div>
-                    <div style="font-size:13px;color:#555;margin-bottom:6px;">
-                        {fp['airline']}
-                    </div>
-                    <hr style="margin:4px 0;">
-                    <div style="font-size:12px;">
-                        Alt: <b>{alt_text}</b><br>
-                        Speed: <b>{fp['spd']} kts</b>
-                    </div>
-                </div>
-            """
-            folium.Marker(
-                [fp["lat"], fp["lon"]],
-                popup=folium.Popup(popup_html, max_width=220),
-                tooltip=f"{fp['flight_no']} — {fp['airline']}",
-                icon=folium.Icon(color=color, icon="plane", prefix="fa"),
-            ).add_to(fmap)
-        st_folium(fmap, height=600, returned_objects=[], key="flight_map")
+        """Leaflet map via st.components.v1.html.
+        On first render the full map initialises (tiles, user pin, 10 km circle).
+        On every subsequent fragment re-run the HTML is identical EXCEPT the
+        flight-positions JSON block — the inline script detects the existing
+        window._skyMap and only removes/re-adds the plane markers layer,
+        leaving the base map, circle and user pin completely untouched."""
+
+        positions = st.session_state.live_flight_positions
+        positions_json = json.dumps(positions)
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html, body {{ margin:0; padding:0; background:#0a0a0a; }}
+    #map {{ height:600px; width:100%; }}
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+(function() {{
+  var userLat  = {lat};
+  var userLon  = {lon};
+  var radius   = {SEARCH_RADIUS_M};
+  var positions = {positions_json};
+
+  /* ── colour by altitude ── */
+  function altColor(alt) {{
+    if (!alt || alt === 0) return '#aaaaaa';
+    if (alt < 3000)        return '#44ff88';
+    if (alt < 15000)       return '#ffaa00';
+    return '#ff4444';
+  }}
+
+  /* ── init map once per page load ── */
+  if (!window._skyMap) {{
+    window._skyMap = L.map('map', {{
+      center: [userLat, userLon],
+      zoom: 13,
+      zoomControl: true
+    }});
+
+    L.tileLayer(
+      'https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png',
+      {{ attribution: '© CartoDB', maxZoom: 19 }}
+    ).addTo(window._skyMap);
+
+    /* user position pin */
+    var youIcon = L.divIcon({{
+      html: '<div style="width:14px;height:14px;border-radius:50%;'
+          + 'background:#ff3333;border:2px solid #fff;'
+          + 'box-shadow:0 0 6px #ff3333"></div>',
+      iconSize: [14, 14], iconAnchor: [7, 7], className: ''
+    }});
+    L.marker([userLat, userLon], {{ icon: youIcon }})
+     .bindTooltip('You are here', {{ permanent: false }})
+     .addTo(window._skyMap);
+
+    /* 10 km radius circle — always visible */
+    L.circle([userLat, userLon], {{
+      radius:      radius,
+      color:       '#00d4ff',
+      weight:      2,
+      opacity:     0.8,
+      fill:        true,
+      fillColor:   '#00d4ff',
+      fillOpacity: 0.04
+    }}).addTo(window._skyMap);
+
+    window._planeLayer = L.layerGroup().addTo(window._skyMap);
+  }}
+
+  /* ── swap only the plane markers layer ── */
+  window._planeLayer.clearLayers();
+
+  positions.forEach(function(fp) {{
+    var color = altColor(fp.alt);
+    var hdg   = fp.heading || 0;
+
+    /* squawk alert ring */
+    var sq = fp.sq || '';
+    if (sq === '7700' || sq === '7500' || sq === '7600') {{
+      L.circleMarker([fp.lat, fp.lon], {{
+        radius: 24, color: '#ff0000',
+        fill: true, fillOpacity: 0.18, weight: 2
+      }}).addTo(window._planeLayer);
+    }}
+
+    /* projected path */
+    if (fp.heading && fp.spd && fp.spd > 0) {{
+      var distKm = fp.spd * 1.852 * (5 / 60);
+      var R = 6371;
+      var d = distKm / R;
+      var brng = fp.heading * Math.PI / 180;
+      var lat1 = fp.lat * Math.PI / 180;
+      var lon1 = fp.lon * Math.PI / 180;
+      var lat2 = Math.asin(
+        Math.sin(lat1)*Math.cos(d) +
+        Math.cos(lat1)*Math.sin(d)*Math.cos(brng)
+      );
+      var lon2 = lon1 + Math.atan2(
+        Math.sin(brng)*Math.sin(d)*Math.cos(lat1),
+        Math.cos(d)-Math.sin(lat1)*Math.sin(lat2)
+      );
+      var projLat = lat2 * 180 / Math.PI;
+      var projLon = lon2 * 180 / Math.PI;
+      L.polyline([[fp.lat, fp.lon], [projLat, projLon]], {{
+        color: '#00d4ff', weight: 2, opacity: 0.6, dashArray: '6,5'
+      }}).addTo(window._planeLayer);
+      L.circleMarker([projLat, projLon], {{
+        radius: 5, color: '#00d4ff', fill: true, fillOpacity: 0.5, weight: 1
+      }}).bindTooltip('Projected: ' + fp.flight_no + ' in 5 min')
+        .addTo(window._planeLayer);
+    }}
+
+    /* plane icon — rotated to heading */
+    var planeIcon = L.divIcon({{
+      html: '<div style="font-size:22px;line-height:1;'
+          + 'color:' + color + ';'
+          + 'transform:rotate(' + hdg + 'deg);'
+          + 'filter:drop-shadow(0 0 3px ' + color + ')">✈</div>',
+      iconSize: [22, 22], iconAnchor: [11, 11], className: ''
+    }});
+
+    var altText = fp.alt ? fp.alt.toLocaleString() + ' ft' : 'N/A';
+    var spdText = fp.spd ? fp.spd + ' kts' : 'N/A';
+
+    L.marker([fp.lat, fp.lon], {{ icon: planeIcon }})
+     .bindTooltip(fp.flight_no + ' — ' + fp.airline, {{ sticky: false }})
+     .bindPopup(
+       '<div style="font-family:monospace;min-width:170px;">'
+       + '<div style="font-size:15px;font-weight:bold;margin-bottom:2px;">'
+       + fp.flight_no + '</div>'
+       + '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
+       + fp.airline + '</div>'
+       + '<hr style="margin:4px 0;">'
+       + '<div style="font-size:12px;">'
+       + 'Alt: <b>' + altText + '</b><br>'
+       + 'Speed: <b>' + spdText + '</b>'
+       + '</div></div>',
+       {{ maxWidth: 220 }}
+     )
+     .addTo(window._planeLayer);
+  }});
+}})();
+</script>
+</body>
+</html>"""
+
+        components.html(html, height=620)
 
     def _render_heatmap_tab(lat: float, lon: float) -> None:
         if st.session_state.heatmap_points:
