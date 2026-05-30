@@ -411,7 +411,13 @@ else:
         return True
 
     def _render_live_map(lat: float, lon: float) -> None:
-        fmap = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB dark_matter")
+        # location= centers the map on the user; no fixed width so it fills the
+        # container and stays centered on every screen size (mobile + desktop)
+        fmap = folium.Map(
+            location=[lat, lon],
+            zoom_start=13,
+            tiles="CartoDB dark_matter",
+        )
         folium.Marker(
             [lat, lon],
             tooltip="You are here",
@@ -444,18 +450,28 @@ else:
                     tooltip=f"Projected: {fp['flight_no']} in 5 min",
                 ).add_to(fmap)
             alt_text = f"{fp['alt']:,} ft" if fp["alt"] else "N/A"
+            popup_html = f"""
+                <div style="font-family:monospace;min-width:180px;">
+                    <div style="font-size:15px;font-weight:bold;margin-bottom:4px;">
+                        {fp['flight_no']}
+                    </div>
+                    <div style="font-size:13px;color:#555;margin-bottom:6px;">
+                        {fp['airline']}
+                    </div>
+                    <hr style="margin:4px 0;">
+                    <div style="font-size:12px;">
+                        Alt: <b>{alt_text}</b><br>
+                        Speed: <b>{fp['spd']} kts</b>
+                    </div>
+                </div>
+            """
             folium.Marker(
                 [fp["lat"], fp["lon"]],
-                popup=(
-                    f"<b>{fp['airline']}</b><br>"
-                    f"Flight: {fp['flight_no']}<br>"
-                    f"Alt: {alt_text}<br>"
-                    f"Speed: {fp['spd']} kts"
-                ),
-                tooltip=f"{fp['airline']} — {fp['flight_no']}",
+                popup=folium.Popup(popup_html, max_width=220),
+                tooltip=f"{fp['flight_no']} — {fp['airline']}",
                 icon=folium.Icon(color=color, icon="plane", prefix="fa"),
             ).add_to(fmap)
-        st_folium(fmap, width=1400, height=600, returned_objects=[], key="flight_map")
+        st_folium(fmap, height=600, returned_objects=[], key="flight_map")
 
     def _render_heatmap_tab(lat: float, lon: float) -> None:
         if st.session_state.heatmap_points:
