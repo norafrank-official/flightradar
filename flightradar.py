@@ -477,8 +477,8 @@ else:
      .bindTooltip('You are here', {{ permanent: false }})
      .addTo(window._skyMap);
 
-    /* 10 km radius circle — always visible */
-    L.circle([userLat, userLon], {{
+    /* 10 km radius circle — always visible, map fitted to it on init */
+    var circle = L.circle([userLat, userLon], {{
       radius:      radius,
       color:       '#00d4ff',
       weight:      2,
@@ -487,6 +487,7 @@ else:
       fillColor:   '#00d4ff',
       fillOpacity: 0.04
     }}).addTo(window._skyMap);
+    window._skyMap.fitBounds(circle.getBounds(), {{ padding: [20, 20] }});
 
     window._planeLayer = L.layerGroup().addTo(window._skyMap);
   }}
