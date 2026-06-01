@@ -481,7 +481,7 @@ else:
     return L.divIcon({{
       html: '<div style="font-size:22px;line-height:1;'
           + 'color:' + color + ';'
-          + 'transform:rotate(' + (hdg - 45) + 'deg);'
+          + 'transform:rotate(' + (hdg - 90) + 'deg);'
           + 'transition:transform 0.5s ease;'
           + 'filter:drop-shadow(0 0 3px ' + color + ')">✈</div>',
       iconSize: [22, 22], iconAnchor: [11, 11], className: ''
