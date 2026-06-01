@@ -415,11 +415,10 @@ else:
 
     def _render_live_map(lat: float, lon: float) -> None:
         """Leaflet map via st.components.v1.html.
-        On first render the full map initialises (tiles, user pin, 10 km circle).
-        On every subsequent fragment re-run the HTML is identical EXCEPT the
-        flight-positions JSON block — the inline script detects the existing
-        window._skyMap and only removes/re-adds the plane markers layer,
-        leaving the base map, circle and user pin completely untouched."""
+        Init once (tiles, user pin, 10 km circle).  On every fragment tick only
+        the plane markers slide to new positions via setLatLng — base map is
+        never destroyed.  Overlays (heading lines, squawk rings) rebuild each
+        tick (cheap polylines).  A re-center button lets the user snap back."""
 
         positions = st.session_state.live_flight_positions
         positions_json = json.dumps(positions)
@@ -434,15 +433,21 @@ else:
   <style>
     html, body {{ margin:0; padding:0; background:#0a0a0a; }}
     #map {{ height:600px; width:100%; }}
+    .recenter-btn {{
+      background:#1a1a2e; color:#00d4ff; border:1px solid #00d4ff;
+      border-radius:4px; padding:5px 10px; font-size:12px;
+      font-family:monospace; cursor:pointer; line-height:1;
+    }}
+    .recenter-btn:hover {{ background:#00d4ff; color:#0a0a0a; }}
   </style>
 </head>
 <body>
 <div id="map"></div>
 <script>
 (function() {{
-  var userLat  = {lat};
-  var userLon  = {lon};
-  var radius   = {SEARCH_RADIUS_M};
+  var userLat   = {lat};
+  var userLon   = {lon};
+  var radius    = {SEARCH_RADIUS_M};
   var positions = {positions_json};
 
   /* ── colour by altitude ── */
@@ -451,6 +456,36 @@ else:
     if (alt < 3000)        return '#44ff88';
     if (alt < 15000)       return '#ffaa00';
     return '#ff4444';
+  }}
+
+  /* ── haversine forward projection ── */
+  function projectPoint(lat, lon, hdg, distKm) {{
+    var R = 6371;
+    var d = distKm / R;
+    var brng = hdg * Math.PI / 180;
+    var lat1 = lat * Math.PI / 180;
+    var lon1 = lon * Math.PI / 180;
+    var lat2 = Math.asin(
+      Math.sin(lat1)*Math.cos(d) +
+      Math.cos(lat1)*Math.sin(d)*Math.cos(brng)
+    );
+    var lon2 = lon1 + Math.atan2(
+      Math.sin(brng)*Math.sin(d)*Math.cos(lat1),
+      Math.cos(d)-Math.sin(lat1)*Math.sin(lat2)
+    );
+    return [lat2 * 180 / Math.PI, lon2 * 180 / Math.PI];
+  }}
+
+  /* ── build plane divIcon ── */
+  function makePlaneIcon(color, hdg) {{
+    return L.divIcon({{
+      html: '<div style="font-size:22px;line-height:1;'
+          + 'color:' + color + ';'
+          + 'transform:rotate(' + (hdg - 45) + 'deg);'
+          + 'transition:transform 0.5s ease;'
+          + 'filter:drop-shadow(0 0 3px ' + color + ')">✈</div>',
+      iconSize: [22, 22], iconAnchor: [11, 11], className: ''
+    }});
   }}
 
   /* ── init map once per page load ── */
@@ -463,7 +498,7 @@ else:
 
     L.tileLayer(
       'https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png',
-      {{ attribution: '© CartoDB', maxZoom: 19 }}
+      {{ attribution: '&copy; CartoDB', maxZoom: 19 }}
     ).addTo(window._skyMap);
 
     /* user position pin */
@@ -477,8 +512,8 @@ else:
      .bindTooltip('You are here', {{ permanent: false }})
      .addTo(window._skyMap);
 
-    /* 10 km radius circle — always visible, map fitted to it on init */
-    var circle = L.circle([userLat, userLon], {{
+    /* 10 km radius circle */
+    window._skyCircle = L.circle([userLat, userLon], {{
       radius:      radius,
       color:       '#00d4ff',
       weight:      2,
@@ -487,82 +522,118 @@ else:
       fillColor:   '#00d4ff',
       fillOpacity: 0.04
     }}).addTo(window._skyMap);
-    window._skyMap.fitBounds(circle.getBounds(), {{ padding: [20, 20] }});
+    window._skyMap.fitBounds(window._skyCircle.getBounds(), {{ padding: [20, 20] }});
 
-    window._planeLayer = L.layerGroup().addTo(window._skyMap);
+    /* re-center button (Leaflet custom control) */
+    var RecenterCtrl = L.Control.extend({{
+      options: {{ position: 'topright' }},
+      onAdd: function() {{
+        var btn = L.DomUtil.create('button', 'recenter-btn');
+        btn.innerHTML = 'Re-center';
+        btn.title = 'Fit 10 km radius';
+        L.DomEvent.disableClickPropagation(btn);
+        btn.addEventListener('click', function() {{
+          window._userInteracted = false;
+          window._skyMap.fitBounds(
+            window._skyCircle.getBounds(), {{ padding: [20, 20] }}
+          );
+        }});
+        return btn;
+      }}
+    }});
+    new RecenterCtrl().addTo(window._skyMap);
+
+    /* track whether user has manually panned/zoomed */
+    window._userInteracted = false;
+    window._skyMap.on('dragstart zoomstart', function() {{
+      window._userInteracted = true;
+    }});
+
+    /* persistent plane markers dict + disposable overlay layer */
+    window._planeMarkers = {{}};
+    window._overlayLayer = L.layerGroup().addTo(window._skyMap);
   }}
 
-  /* ── swap only the plane markers layer ── */
-  window._planeLayer.clearLayers();
+  /* ── auto re-center if user hasn't interacted ── */
+  if (!window._userInteracted) {{
+    window._skyMap.fitBounds(
+      window._skyCircle.getBounds(), {{ padding: [20, 20] }}
+    );
+  }}
+
+  /* ── clear overlays (heading lines, squawk rings) — cheap to rebuild ── */
+  window._overlayLayer.clearLayers();
+
+  /* ── update plane markers (slide existing, add new, remove departed) ── */
+  var activeIds = {{}};
 
   positions.forEach(function(fp) {{
     var color = altColor(fp.alt);
     var hdg   = fp.heading || 0;
+    var id    = fp.flight_no;
+    activeIds[id] = true;
 
-    /* squawk alert ring */
+    /* squawk alert ring (overlay — rebuilt each tick) */
     var sq = fp.sq || '';
     if (sq === '7700' || sq === '7500' || sq === '7600') {{
       L.circleMarker([fp.lat, fp.lon], {{
         radius: 24, color: '#ff0000',
         fill: true, fillOpacity: 0.18, weight: 2
-      }}).addTo(window._planeLayer);
+      }}).addTo(window._overlayLayer);
     }}
 
-    /* projected path */
-    if (fp.heading && fp.spd && fp.spd > 0) {{
-      var distKm = fp.spd * 1.852 * (5 / 60);
-      var R = 6371;
-      var d = distKm / R;
-      var brng = fp.heading * Math.PI / 180;
-      var lat1 = fp.lat * Math.PI / 180;
-      var lon1 = fp.lon * Math.PI / 180;
-      var lat2 = Math.asin(
-        Math.sin(lat1)*Math.cos(d) +
-        Math.cos(lat1)*Math.sin(d)*Math.cos(brng)
-      );
-      var lon2 = lon1 + Math.atan2(
-        Math.sin(brng)*Math.sin(d)*Math.cos(lat1),
-        Math.cos(d)-Math.sin(lat1)*Math.sin(lat2)
-      );
-      var projLat = lat2 * 180 / Math.PI;
-      var projLon = lon2 * 180 / Math.PI;
-      L.polyline([[fp.lat, fp.lon], [projLat, projLon]], {{
+    /* heading line — 20 km ray showing direction of travel (overlay) */
+    if (fp.heading != null) {{
+      var proj = projectPoint(fp.lat, fp.lon, fp.heading, 20);
+      L.polyline([[fp.lat, fp.lon], proj], {{
         color: '#00d4ff', weight: 2, opacity: 0.6, dashArray: '6,5'
-      }}).addTo(window._planeLayer);
-      L.circleMarker([projLat, projLon], {{
-        radius: 5, color: '#00d4ff', fill: true, fillOpacity: 0.5, weight: 1
-      }}).bindTooltip('Projected: ' + fp.flight_no + ' in 5 min')
-        .addTo(window._planeLayer);
+      }}).addTo(window._overlayLayer);
+      L.circleMarker(proj, {{
+        radius: 4, color: '#00d4ff', fill: true, fillOpacity: 0.5, weight: 1
+      }}).bindTooltip('Heading: ' + fp.flight_no)
+        .addTo(window._overlayLayer);
     }}
 
-    /* plane icon — rotated to heading */
-    var planeIcon = L.divIcon({{
-      html: '<div style="font-size:22px;line-height:1;'
-          + 'color:' + color + ';'
-          + 'transform:rotate(' + hdg + 'deg);'
-          + 'filter:drop-shadow(0 0 3px ' + color + ')">✈</div>',
-      iconSize: [22, 22], iconAnchor: [11, 11], className: ''
-    }});
-
+    /* plane marker — slide existing or create new */
     var altText = fp.alt ? fp.alt.toLocaleString() + ' ft' : 'N/A';
     var spdText = fp.spd ? fp.spd + ' kts' : 'N/A';
+    var popupHtml =
+      '<div style="font-family:monospace;min-width:170px;">'
+      + '<div style="font-size:15px;font-weight:bold;margin-bottom:2px;">'
+      + fp.flight_no + '</div>'
+      + '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
+      + fp.airline + '</div>'
+      + '<hr style="margin:4px 0;">'
+      + '<div style="font-size:12px;">'
+      + 'Alt: <b>' + altText + '</b><br>'
+      + 'Speed: <b>' + spdText + '</b>'
+      + '</div></div>';
 
-    L.marker([fp.lat, fp.lon], {{ icon: planeIcon }})
-     .bindTooltip(fp.flight_no + ' — ' + fp.airline, {{ sticky: false }})
-     .bindPopup(
-       '<div style="font-family:monospace;min-width:170px;">'
-       + '<div style="font-size:15px;font-weight:bold;margin-bottom:2px;">'
-       + fp.flight_no + '</div>'
-       + '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
-       + fp.airline + '</div>'
-       + '<hr style="margin:4px 0;">'
-       + '<div style="font-size:12px;">'
-       + 'Alt: <b>' + altText + '</b><br>'
-       + 'Speed: <b>' + spdText + '</b>'
-       + '</div></div>',
-       {{ maxWidth: 220 }}
-     )
-     .addTo(window._planeLayer);
+    if (window._planeMarkers[id]) {{
+      /* existing plane — slide to new position, update icon rotation */
+      var m = window._planeMarkers[id];
+      m.setLatLng([fp.lat, fp.lon]);
+      m.setIcon(makePlaneIcon(color, hdg));
+      m.setTooltipContent(fp.flight_no + ' — ' + fp.airline);
+      m.setPopupContent(popupHtml);
+    }} else {{
+      /* new plane entering radius */
+      var marker = L.marker([fp.lat, fp.lon], {{
+        icon: makePlaneIcon(color, hdg)
+      }})
+      .bindTooltip(fp.flight_no + ' — ' + fp.airline, {{ sticky: false }})
+      .bindPopup(popupHtml, {{ maxWidth: 220 }})
+      .addTo(window._skyMap);
+      window._planeMarkers[id] = marker;
+    }}
+  }});
+
+  /* remove departed planes (no longer in positions data) */
+  Object.keys(window._planeMarkers).forEach(function(id) {{
+    if (!activeIds[id]) {{
+      window._skyMap.removeLayer(window._planeMarkers[id]);
+      delete window._planeMarkers[id];
+    }}
   }});
 }})();
 </script>
