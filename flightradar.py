@@ -34,63 +34,61 @@ st.set_page_config(page_title="SkyWatcher Pro", layout="wide", page_icon="radar"
 
 st.markdown("""
     <style>
-    /* ── force pure black background everywhere ── */
+    /* ── override Streamlit CSS variables at root ── */
+    :root, [data-testid="stAppViewContainer"] {
+        --primary-color: #39ff14;
+        --background-color: #000000;
+        --secondary-background-color: #0a0a0a;
+        --text-color: #e0e0e0;
+    }
+    /* ── force pure black on every surface ── */
+    html, body,
     .stApp,
     .stApp > header,
-    .stApp [data-testid="stAppViewContainer"],
-    .stApp [data-testid="stHeader"],
-    .stApp [data-testid="stToolbar"],
-    .stApp [data-testid="stDecoration"],
-    .stApp [data-testid="stAppViewBlockContainer"],
+    [data-testid="stAppViewContainer"],
+    [data-testid="stHeader"],
+    [data-testid="stToolbar"],
+    [data-testid="stDecoration"],
+    [data-testid="stBottom"],
+    [data-testid="stAppViewBlockContainer"],
     section[data-testid="stSidebar"],
-    section[data-testid="stSidebar"] > div {
+    section[data-testid="stSidebar"] > div,
+    section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
         background-color: #000000 !important;
         background: #000000 !important;
     }
-    /* ── headings — neon green ── */
-    .stApp h1, .stApp h2, .stApp h3, .stApp h4,
-    .stApp [data-testid="stMarkdownContainer"] h1,
-    .stApp [data-testid="stMarkdownContainer"] h2,
-    .stApp [data-testid="stMarkdownContainer"] h3 {
+    /* ── ALL headings — neon green ── */
+    h1, h2, h3, h4, h5, h6 {
         color: #39ff14 !important;
     }
     /* ── body text — white ── */
-    .stApp p, .stApp span, .stApp label, .stApp li,
-    .stApp [data-testid="stMarkdownContainer"] p,
-    .stApp [data-testid="stMarkdownContainer"] span {
+    p, span, label, li, div, td, th, a {
         color: #e0e0e0 !important;
     }
     /* ── metric values — neon green, larger ── */
-    .stApp div[data-testid="stMetricValue"] {
+    [data-testid="stMetricValue"] {
         font-size: 24px !important;
         color: #39ff14 !important;
     }
-    .stApp div[data-testid="stMetricDelta"] {
+    [data-testid="stMetricValue"] * {
         color: #39ff14 !important;
     }
-    .stApp div[data-testid="stMetricLabel"] label {
-        color: #e0e0e0 !important;
+    [data-testid="stMetricDelta"], [data-testid="stMetricDelta"] * {
+        color: #39ff14 !important;
     }
     /* ── tabs — neon green active ── */
-    .stApp button[data-baseweb="tab"] { color: #666 !important; }
-    .stApp button[data-baseweb="tab"][aria-selected="true"] {
+    button[data-baseweb="tab"] { color: #666 !important; }
+    button[data-baseweb="tab"][aria-selected="true"] {
         color: #39ff14 !important;
         border-bottom-color: #39ff14 !important;
     }
-    /* ── alert boxes — very dark bg ── */
-    .stApp .stAlert { background-color: #0a0a0a !important; }
+    /* ── alert boxes ── */
+    .stAlert { background-color: #0a0a0a !important; }
     /* ── dividers ── */
-    .stApp hr { border-color: #1a1a1a !important; }
-    /* ── sidebar text ── */
-    section[data-testid="stSidebar"] p,
-    section[data-testid="stSidebar"] span,
-    section[data-testid="stSidebar"] label,
-    section[data-testid="stSidebar"] li {
-        color: #e0e0e0 !important;
-    }
-    section[data-testid="stSidebar"] h1,
-    section[data-testid="stSidebar"] h2 {
-        color: #39ff14 !important;
+    hr { border-color: #1a1a1a !important; }
+    /* ── dataframe / table ── */
+    .stDataFrame iframe {
+        border: 1px solid #1a1a1a !important;
     }
     </style>
 """, unsafe_allow_html=True)
