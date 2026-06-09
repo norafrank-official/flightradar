@@ -34,8 +34,47 @@ st.set_page_config(page_title="SkyWatcher Pro", layout="wide", page_icon="radar"
 
 st.markdown("""
     <style>
-    .main { background-color: #0a0a0a; }
-    div[data-testid="stMetricValue"] { font-size: 24px; color: #00d4ff; }
+    /* ── black background, neon green + white text ── */
+    .main, .stApp, [data-testid="stAppViewContainer"],
+    [data-testid="stHeader"], section[data-testid="stSidebar"],
+    [data-testid="stSidebarContent"] {
+        background-color: #000000 !important;
+    }
+    /* primary text — white */
+    .stApp, .stApp p, .stApp span, .stApp li, .stApp label,
+    .stApp div, [data-testid="stSidebar"] * {
+        color: #e0e0e0 !important;
+    }
+    /* headings — neon green */
+    .stApp h1, .stApp h2, .stApp h3, .stApp h4 {
+        color: #39ff14 !important;
+    }
+    /* metric values — neon green */
+    div[data-testid="stMetricValue"] {
+        font-size: 24px; color: #39ff14 !important;
+    }
+    /* metric labels — white */
+    div[data-testid="stMetricLabel"] {
+        color: #e0e0e0 !important;
+    }
+    /* info/warning/error boxes — dark bg so they don't blow out */
+    .stAlert { background-color: #0a0a0a !important; }
+    /* tabs — neon green active, grey inactive */
+    button[data-baseweb="tab"] {
+        color: #888 !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: #39ff14 !important;
+    }
+    /* dataframe — dark cells */
+    .stDataFrame, .stDataFrame td, .stDataFrame th {
+        background-color: #0a0a0a !important;
+        color: #e0e0e0 !important;
+    }
+    /* sidebar divider */
+    hr { border-color: #222 !important; }
+    /* selectbox / dropdown */
+    [data-baseweb="select"] { background-color: #111 !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -434,11 +473,11 @@ else:
     html, body {{ margin:0; padding:0; background:#0a0a0a; }}
     #map {{ height:600px; width:100%; }}
     .recenter-btn {{
-      background:#1a1a2e; color:#00d4ff; border:1px solid #00d4ff;
+      background:#000000; color:#39ff14; border:1px solid #39ff14;
       border-radius:4px; padding:5px 10px; font-size:12px;
       font-family:monospace; cursor:pointer; line-height:1;
     }}
-    .recenter-btn:hover {{ background:#00d4ff; color:#0a0a0a; }}
+    .recenter-btn:hover {{ background:#39ff14; color:#000000; }}
   </style>
 </head>
 <body>
