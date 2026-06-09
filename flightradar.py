@@ -61,6 +61,32 @@ st.markdown("""
     h1, h2, h3, h4, h5, h6 {
         color: #39ff14 !important;
     }
+    /* Streamlit's title/header — these are usually the first large text blocks */
+    [data-testid="stAppViewContainer"] > div > div:first-child {
+        color: #39ff14 !important;
+    }
+    [data-testid="stAppViewContainer"] > div > div:first-child * {
+        color: #39ff14 !important;
+    }
+    /* Markdown headings */
+    [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stMarkdownContainer"] h4 {
+        color: #39ff14 !important;
+    }
+    /* Catch headings in any markdown */
+    [data-testid="stMarkdownContainer"] {
+        color: #e0e0e0 !important;
+    }
+    [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stMarkdownContainer"] h4,
+    [data-testid="stMarkdownContainer"] h5,
+    [data-testid="stMarkdownContainer"] h6 {
+        color: #39ff14 !important;
+    }
     /* ── body text — white ── */
     p, span, label, li, div, td, th, a {
         color: #e0e0e0 !important;
