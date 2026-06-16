@@ -576,10 +576,16 @@ else:
       zoomControl: true
     }});
 
-    /* standard OpenStreetMap — colourful, maximally detailed */
+    /* detailed dark basemap — Esri Dark Gray Canvas (note: {{z}}/{{y}}/{{x}} order) */
     L.tileLayer(
-      'https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
-      {{ attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }}
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{{z}}/{{y}}/{{x}}',
+      {{ attribution: '&copy; Esri', maxZoom: 16 }}
+    ).addTo(window._skyMap);
+
+    /* dark map labels overlay (roads, place names) */
+    L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{{z}}/{{y}}/{{x}}',
+      {{ attribution: '', maxZoom: 16 }}
     ).addTo(window._skyMap);
 
     /* user position pin */
