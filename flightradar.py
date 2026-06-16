@@ -576,9 +576,16 @@ else:
       zoomControl: true
     }});
 
+    /* satellite base — Esri World Imagery (note: {{z}}/{{y}}/{{x}} order) */
     L.tileLayer(
-      'https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png',
-      {{ attribution: '&copy; CartoDB', maxZoom: 19 }}
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}',
+      {{ attribution: '&copy; Esri', maxZoom: 19 }}
+    ).addTo(window._skyMap);
+
+    /* white place/road labels overlay — CartoDB dark_only_labels (transparent bg) */
+    L.tileLayer(
+      'https://{{s}}.basemaps.cartocdn.com/dark_only_labels/{{z}}/{{x}}/{{y}}{{r}}.png',
+      {{ attribution: '&copy; CARTO', maxZoom: 19 }}
     ).addTo(window._skyMap);
 
     /* user position pin */
