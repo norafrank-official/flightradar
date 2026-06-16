@@ -576,10 +576,10 @@ else:
       zoomControl: true
     }});
 
-    /* light detailed basemap — CartoDB Voyager (FlightAware default look) */
+    /* standard OpenStreetMap — colourful, maximally detailed */
     L.tileLayer(
-      'https://{{s}}.basemaps.cartocdn.com/rastertiles/voyager/{{z}}/{{x}}/{{y}}{{r}}.png',
-      {{ attribution: '&copy; CARTO', maxZoom: 20 }}
+      'https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
+      {{ attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }}
     ).addTo(window._skyMap);
 
     /* user position pin */
