@@ -1,5 +1,6 @@
 import logging
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import json
@@ -10,11 +11,13 @@ import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from FlightRadar24 import FlightRadar24API
+from FlightRadarAPI import FlightRadar24API
 from streamlit_folium import st_folium
 from streamlit_js_eval import get_geolocation
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
+# the library logs a benign gzip-decode warning on every fetch — errors only
+logging.getLogger("FlightRadarAPI").setLevel(logging.ERROR)
 
 # --- CONFIGURATION ---
 try:
@@ -207,11 +210,14 @@ def get_cached_details(fr_api, flight, cache: dict, airline_lookup: dict, image_
     function because it is called from ThreadPoolExecutor worker threads."""
     fid = _flight_key(flight)
     if fid in cache:
-        try:
-            flight.set_flight_details(cache[fid]["raw"])
-        except Exception:
-            pass
-        return cache[fid]
+        entry = cache[fid]
+        # failed fetches (FR24 rate limit etc.) are retried after a cooldown
+        if not entry.get("_failed") or time.time() < entry.get("_retry_at", 0):
+            try:
+                flight.set_flight_details(entry["raw"])
+            except Exception:
+                pass
+            return entry
 
     reg  = getattr(flight, "registration", None) or ""
     iata = getattr(flight, "airline_iata",  "") or ""
@@ -244,7 +250,7 @@ def get_cached_details(fr_api, flight, cache: dict, airline_lookup: dict, image_
         }
     except Exception as e:
         logging.warning(f"Detail fetch failed for {fid}: {e}")
-        # FR24 detail endpoint blocked — use Planespotters for image, base attrs for text
+        # FR24 detail endpoint blocked/rate-limited — degrade gracefully and retry later
         entry = {
             "airline":   airline_lookup.get(iata) or airline_lookup.get(icao) or iata or "—",
             "flight_no": getattr(flight, "number", None) or getattr(flight, "callsign", None) or "—",
@@ -252,21 +258,28 @@ def get_cached_details(fr_api, flight, cache: dict, airline_lookup: dict, image_
             "dest":      getattr(flight, "destination_airport_iata", None) or "—",
             "image_url": get_aircraft_image(reg, image_cache),
             "raw":       {},
+            "_failed":   True,
+            "_retry_at": time.time() + 90,
         }
     cache[fid] = entry
     return entry
 
 def warm_cache_parallel(fr_api, flights):
-    """Fetch details for uncached flights in parallel (5 workers).
+    """Fetch details for uncached flights in parallel (3 workers — FR24 429s bigger bursts).
     Extracts session_state dicts in the main thread, then passes them into workers
     as plain Python objects — session_state is not accessible in worker threads."""
     cache         = st.session_state.flight_details_cache
     airline_lookup = st.session_state.airline_lookup
     image_cache   = st.session_state.image_cache
-    uncached = [f for f in flights if _flight_key(f) not in cache]
+    now = time.time()
+    uncached = [
+        f for f in flights
+        if _flight_key(f) not in cache
+        or (cache[_flight_key(f)].get("_failed") and now >= cache[_flight_key(f)].get("_retry_at", 0))
+    ]
     if not uncached:
         return
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(
             lambda f: get_cached_details(fr_api, f, cache, airline_lookup, image_cache),
             uncached,
@@ -341,6 +354,15 @@ refresh_seconds = _refresh_map[refresh_choice]
 
 st.sidebar.divider()
 
+st.sidebar.title("Location")
+loc_mode = st.sidebar.radio("Source", ["Auto (GPS)", "Manual"], index=0)
+manual_lat = manual_lon = None
+if loc_mode == "Manual":
+    manual_lat = st.sidebar.number_input("Latitude", min_value=-90.0, max_value=90.0, value=51.4700, format="%.4f")
+    manual_lon = st.sidebar.number_input("Longitude", min_value=-180.0, max_value=180.0, value=-0.4543, format="%.4f")
+
+st.sidebar.divider()
+
 st.sidebar.title("About")
 st.sidebar.info("ADS-B transponder data + meteorological data for close-range spotting (~10 km).")
 st.sidebar.markdown("""
@@ -350,14 +372,22 @@ st.sidebar.markdown("""
 - UI: Streamlit & Folium
 """)
 
-# 1. Geolocation
-loc = get_geolocation()
-
-if not loc:
-    st.info("Accessing GPS... Please allow location permissions in your browser.")
+# 1. Location — GPS with manual fallback (GPS can be denied/unavailable)
+lat = lon = None
+if loc_mode == "Manual":
+    lat, lon = manual_lat, manual_lon
 else:
-    lat = loc["coords"]["latitude"]
-    lon = loc["coords"]["longitude"]
+    loc = get_geolocation()
+    if loc and loc.get("coords"):
+        lat = loc["coords"]["latitude"]
+        lon = loc["coords"]["longitude"]
+
+if lat is None or lon is None:
+    st.info(
+        "Accessing GPS... Please allow location permissions in your browser. "
+        "If GPS is blocked or unavailable, switch **Location → Manual** in the sidebar."
+    )
+else:
 
     # 2. Weather (cached, doesn't change often)
     weather = get_weather_data(lat, lon)
@@ -417,7 +447,7 @@ else:
             st.session_state.live_nearest_info = None
             return True
 
-        # Parallel warm-up for any new flight IDs (5 workers)
+        # Parallel warm-up for any new flight IDs
         warm_cache_parallel(fr_api, flights)
 
         # Extract dicts once in main thread for the loop below
@@ -462,7 +492,7 @@ else:
             tech_rows.append({
                 "Flight":       d["flight_no"],
                 "Alt (ft)":     alt_str,
-                "Speed (kt)":   spd if spd else "N/A",
+                "Speed (kt)":   spd if spd else None,
                 "Heading":      f"{heading}°" if heading is not None else "N/A",
                 "Phase":        phase,
                 "Est. Descent": eta_str,
@@ -481,10 +511,14 @@ else:
                     }
                 st.session_state.heatmap_points.append([f_lat, f_lon])
                 flight_positions.append({
+                    "id": str(_flight_key(f) or d["flight_no"]),
                     "lat": f_lat, "lon": f_lon, "alt": alt, "spd": spd,
                     "heading": heading, "sq": sq,
                     "flight_no": d["flight_no"], "airline": d["airline"],
                 })
+
+        # cap heatmap buffer — unbounded growth slows the render and leaks memory
+        st.session_state.heatmap_points = st.session_state.heatmap_points[-2000:]
 
         st.session_state.live_squawk_alerts   = squawk_alerts
         st.session_state.live_journey_rows    = journey_rows
@@ -493,15 +527,12 @@ else:
         st.session_state.live_nearest_info    = nearest_info
         return True
 
-    def _render_live_map(lat: float, lon: float) -> None:
-        """Leaflet map via st.components.v1.html.
-        Init once (tiles, user pin, 10 km circle).  On every fragment tick only
-        the plane markers slide to new positions via setLatLng — base map is
-        never destroyed.  Overlays (heading lines, squawk rings) rebuild each
-        tick (cheap polylines).  A re-center button lets the user snap back."""
-
-        positions = st.session_state.live_flight_positions
-        positions_json = json.dumps(positions)
+    def _render_map_base(lat: float, lon: float) -> None:
+        """Leaflet base map via st.components.v1.html — rendered ONCE, outside
+        any fragment.  The HTML is constant (no flight data embedded), so
+        Streamlit never remounts the iframe: tiles, pan and zoom persist across
+        refresh ticks.  Fresh positions arrive via window.__updatePlanes(),
+        called by the invisible pusher component inside the ticking fragment."""
 
         html = f"""<!DOCTYPE html>
 <html>
@@ -525,10 +556,9 @@ else:
 <div id="map"></div>
 <script>
 (function() {{
-  var userLat   = {lat};
-  var userLon   = {lon};
-  var radius    = {SEARCH_RADIUS_M};
-  var positions = {positions_json};
+  var userLat = {lat};
+  var userLon = {lon};
+  var radius  = {SEARCH_RADIUS_M};
 
   /* ── colour by altitude ── */
   function altColor(alt) {{
@@ -568,166 +598,198 @@ else:
     }});
   }}
 
-  /* ── init map once per page load ── */
-  if (!window._skyMap) {{
-    window._skyMap = L.map('map', {{
-      center: [userLat, userLon],
-      zoom: 13,
-      zoomControl: true
-    }});
+  /* ── init map (runs exactly once — this iframe is never remounted) ── */
+  window._skyMap = L.map('map', {{
+    center: [userLat, userLon],
+    zoom: 13,
+    zoomControl: true
+  }});
 
-    /* detailed dark basemap — Esri Dark Gray Canvas (note: {{z}}/{{y}}/{{x}} order) */
-    L.tileLayer(
-      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{{z}}/{{y}}/{{x}}',
-      {{ attribution: '&copy; Esri', maxZoom: 16 }}
-    ).addTo(window._skyMap);
+  /* detailed dark basemap — Esri Dark Gray Canvas (note: {{z}}/{{y}}/{{x}} order) */
+  L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{{z}}/{{y}}/{{x}}',
+    {{ attribution: '&copy; Esri', maxZoom: 16 }}
+  ).addTo(window._skyMap);
 
-    /* dark map labels overlay (roads, place names) */
-    L.tileLayer(
-      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{{z}}/{{y}}/{{x}}',
-      {{ attribution: '', maxZoom: 16 }}
-    ).addTo(window._skyMap);
+  /* dark map labels overlay (roads, place names) */
+  L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{{z}}/{{y}}/{{x}}',
+    {{ attribution: '', maxZoom: 16 }}
+  ).addTo(window._skyMap);
 
-    /* user position pin */
-    var youIcon = L.divIcon({{
-      html: '<div style="width:14px;height:14px;border-radius:50%;'
-          + 'background:#ff3333;border:2px solid #fff;'
-          + 'box-shadow:0 0 6px #ff3333"></div>',
-      iconSize: [14, 14], iconAnchor: [7, 7], className: ''
-    }});
-    L.marker([userLat, userLon], {{ icon: youIcon }})
-     .bindTooltip('You are here', {{ permanent: false }})
-     .addTo(window._skyMap);
+  /* user position pin */
+  var youIcon = L.divIcon({{
+    html: '<div style="width:14px;height:14px;border-radius:50%;'
+        + 'background:#ff3333;border:2px solid #fff;'
+        + 'box-shadow:0 0 6px #ff3333"></div>',
+    iconSize: [14, 14], iconAnchor: [7, 7], className: ''
+  }});
+  L.marker([userLat, userLon], {{ icon: youIcon }})
+   .bindTooltip('You are here', {{ permanent: false }})
+   .addTo(window._skyMap);
 
-    /* 10 km radius circle */
-    window._skyCircle = L.circle([userLat, userLon], {{
-      radius:      radius,
-      color:       '#00d4ff',
-      weight:      2,
-      opacity:     0.8,
-      fill:        true,
-      fillColor:   '#00d4ff',
-      fillOpacity: 0.04
-    }}).addTo(window._skyMap);
-    window._skyMap.fitBounds(window._skyCircle.getBounds(), {{ padding: [20, 20] }});
+  /* 10 km radius circle */
+  window._skyCircle = L.circle([userLat, userLon], {{
+    radius:      radius,
+    color:       '#00d4ff',
+    weight:      2,
+    opacity:     0.8,
+    fill:        true,
+    fillColor:   '#00d4ff',
+    fillOpacity: 0.04
+  }}).addTo(window._skyMap);
+  window._skyMap.fitBounds(window._skyCircle.getBounds(), {{ padding: [20, 20] }});
 
-    /* re-center button (Leaflet custom control) */
-    var RecenterCtrl = L.Control.extend({{
-      options: {{ position: 'topright' }},
-      onAdd: function() {{
-        var btn = L.DomUtil.create('button', 'recenter-btn');
-        btn.innerHTML = 'Re-center';
-        btn.title = 'Fit 10 km radius';
-        L.DomEvent.disableClickPropagation(btn);
-        btn.addEventListener('click', function() {{
-          window._userInteracted = false;
-          window._skyMap.fitBounds(
-            window._skyCircle.getBounds(), {{ padding: [20, 20] }}
-          );
-        }});
-        return btn;
+  /* re-center button (Leaflet custom control) */
+  var RecenterCtrl = L.Control.extend({{
+    options: {{ position: 'topright' }},
+    onAdd: function() {{
+      var btn = L.DomUtil.create('button', 'recenter-btn');
+      btn.innerHTML = 'Re-center';
+      btn.title = 'Fit 10 km radius';
+      L.DomEvent.disableClickPropagation(btn);
+      btn.addEventListener('click', function() {{
+        window._userInteracted = false;
+        window._skyMap.fitBounds(
+          window._skyCircle.getBounds(), {{ padding: [20, 20] }}
+        );
+      }});
+      return btn;
+    }}
+  }});
+  new RecenterCtrl().addTo(window._skyMap);
+
+  /* track whether user has manually panned/zoomed */
+  window._userInteracted = false;
+  window._skyMap.on('dragstart zoomstart', function() {{
+    window._userInteracted = true;
+  }});
+
+  /* persistent plane markers dict + disposable overlay layer */
+  window._planeMarkers = {{}};
+  window._overlayLayer = L.layerGroup().addTo(window._skyMap);
+
+  /* ── called by the pusher component on every refresh tick ──
+     Only markers move: slide existing, add new, remove departed.
+     The base map is never touched, so there is zero flicker. */
+  window.__updatePlanes = function(positions) {{
+
+    /* clear overlays (heading lines, squawk rings) — cheap to rebuild */
+    window._overlayLayer.clearLayers();
+
+    var activeIds = {{}};
+
+    positions.forEach(function(fp) {{
+      var color = altColor(fp.alt);
+      var hdg   = fp.heading || 0;
+      var id    = fp.id || fp.flight_no;
+      activeIds[id] = true;
+
+      /* squawk alert ring (overlay — rebuilt each tick) */
+      var sq = fp.sq || '';
+      if (sq === '7700' || sq === '7500' || sq === '7600') {{
+        L.circleMarker([fp.lat, fp.lon], {{
+          radius: 24, color: '#ff0000',
+          fill: true, fillOpacity: 0.18, weight: 2
+        }}).addTo(window._overlayLayer);
+      }}
+
+      /* heading line — 20 km ray showing direction of travel (overlay) */
+      if (fp.heading != null) {{
+        var proj = projectPoint(fp.lat, fp.lon, fp.heading, 20);
+        L.polyline([[fp.lat, fp.lon], proj], {{
+          color: '#00d4ff', weight: 2, opacity: 0.6, dashArray: '6,5'
+        }}).addTo(window._overlayLayer);
+        L.circleMarker(proj, {{
+          radius: 4, color: '#00d4ff', fill: true, fillOpacity: 0.5, weight: 1
+        }}).bindTooltip('Heading: ' + fp.flight_no)
+          .addTo(window._overlayLayer);
+      }}
+
+      /* plane marker — slide existing or create new */
+      var altText = fp.alt ? fp.alt.toLocaleString() + ' ft' : 'N/A';
+      var spdText = fp.spd ? fp.spd + ' kts' : 'N/A';
+      var popupHtml =
+        '<div style="font-family:monospace;min-width:170px;">'
+        + '<div style="font-size:15px;font-weight:bold;margin-bottom:2px;">'
+        + fp.flight_no + '</div>'
+        + '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
+        + fp.airline + '</div>'
+        + '<hr style="margin:4px 0;">'
+        + '<div style="font-size:12px;">'
+        + 'Alt: <b>' + altText + '</b><br>'
+        + 'Speed: <b>' + spdText + '</b>'
+        + '</div></div>';
+
+      if (window._planeMarkers[id]) {{
+        /* existing plane — slide to new position, update icon rotation */
+        var m = window._planeMarkers[id];
+        m.setLatLng([fp.lat, fp.lon]);
+        m.setIcon(makePlaneIcon(color, hdg));
+        m.setTooltipContent(fp.flight_no + ' — ' + fp.airline);
+        m.setPopupContent(popupHtml);
+      }} else {{
+        /* new plane entering radius */
+        var marker = L.marker([fp.lat, fp.lon], {{
+          icon: makePlaneIcon(color, hdg)
+        }})
+        .bindTooltip(fp.flight_no + ' — ' + fp.airline, {{ sticky: false }})
+        .bindPopup(popupHtml, {{ maxWidth: 220 }})
+        .addTo(window._skyMap);
+        window._planeMarkers[id] = marker;
       }}
     }});
-    new RecenterCtrl().addTo(window._skyMap);
 
-    /* track whether user has manually panned/zoomed */
-    window._userInteracted = false;
-    window._skyMap.on('dragstart zoomstart', function() {{
-      window._userInteracted = true;
+    /* remove departed planes (no longer in positions data) */
+    Object.keys(window._planeMarkers).forEach(function(id) {{
+      if (!activeIds[id]) {{
+        window._skyMap.removeLayer(window._planeMarkers[id]);
+        delete window._planeMarkers[id];
+      }}
     }});
+  }};
 
-    /* persistent plane markers dict + disposable overlay layer */
-    window._planeMarkers = {{}};
-    window._overlayLayer = L.layerGroup().addTo(window._skyMap);
-  }}
-
-  /* ── auto re-center if user hasn't interacted ── */
-  if (!window._userInteracted) {{
-    window._skyMap.fitBounds(
-      window._skyCircle.getBounds(), {{ padding: [20, 20] }}
-    );
-  }}
-
-  /* ── clear overlays (heading lines, squawk rings) — cheap to rebuild ── */
-  window._overlayLayer.clearLayers();
-
-  /* ── update plane markers (slide existing, add new, remove departed) ── */
-  var activeIds = {{}};
-
-  positions.forEach(function(fp) {{
-    var color = altColor(fp.alt);
-    var hdg   = fp.heading || 0;
-    var id    = fp.flight_no;
-    activeIds[id] = true;
-
-    /* squawk alert ring (overlay — rebuilt each tick) */
-    var sq = fp.sq || '';
-    if (sq === '7700' || sq === '7500' || sq === '7600') {{
-      L.circleMarker([fp.lat, fp.lon], {{
-        radius: 24, color: '#ff0000',
-        fill: true, fillOpacity: 0.18, weight: 2
-      }}).addTo(window._overlayLayer);
-    }}
-
-    /* heading line — 20 km ray showing direction of travel (overlay) */
-    if (fp.heading != null) {{
-      var proj = projectPoint(fp.lat, fp.lon, fp.heading, 20);
-      L.polyline([[fp.lat, fp.lon], proj], {{
-        color: '#00d4ff', weight: 2, opacity: 0.6, dashArray: '6,5'
-      }}).addTo(window._overlayLayer);
-      L.circleMarker(proj, {{
-        radius: 4, color: '#00d4ff', fill: true, fillOpacity: 0.5, weight: 1
-      }}).bindTooltip('Heading: ' + fp.flight_no)
-        .addTo(window._overlayLayer);
-    }}
-
-    /* plane marker — slide existing or create new */
-    var altText = fp.alt ? fp.alt.toLocaleString() + ' ft' : 'N/A';
-    var spdText = fp.spd ? fp.spd + ' kts' : 'N/A';
-    var popupHtml =
-      '<div style="font-family:monospace;min-width:170px;">'
-      + '<div style="font-size:15px;font-weight:bold;margin-bottom:2px;">'
-      + fp.flight_no + '</div>'
-      + '<div style="font-size:12px;color:#666;margin-bottom:6px;">'
-      + fp.airline + '</div>'
-      + '<hr style="margin:4px 0;">'
-      + '<div style="font-size:12px;">'
-      + 'Alt: <b>' + altText + '</b><br>'
-      + 'Speed: <b>' + spdText + '</b>'
-      + '</div></div>';
-
-    if (window._planeMarkers[id]) {{
-      /* existing plane — slide to new position, update icon rotation */
-      var m = window._planeMarkers[id];
-      m.setLatLng([fp.lat, fp.lon]);
-      m.setIcon(makePlaneIcon(color, hdg));
-      m.setTooltipContent(fp.flight_no + ' — ' + fp.airline);
-      m.setPopupContent(popupHtml);
-    }} else {{
-      /* new plane entering radius */
-      var marker = L.marker([fp.lat, fp.lon], {{
-        icon: makePlaneIcon(color, hdg)
-      }})
-      .bindTooltip(fp.flight_no + ' — ' + fp.airline, {{ sticky: false }})
-      .bindPopup(popupHtml, {{ maxWidth: 220 }})
-      .addTo(window._skyMap);
-      window._planeMarkers[id] = marker;
-    }}
-  }});
-
-  /* remove departed planes (no longer in positions data) */
-  Object.keys(window._planeMarkers).forEach(function(id) {{
-    if (!activeIds[id]) {{
-      window._skyMap.removeLayer(window._planeMarkers[id]);
-      delete window._planeMarkers[id];
-    }}
-  }});
+  /* mark this iframe so the pusher can find it among siblings */
+  window.__skywatcherMap = true;
 }})();
 </script>
 </body>
 </html>"""
 
         components.html(html, height=620)
+
+    def _push_positions() -> None:
+        """Invisible 0-px component rendered inside the ticking fragment.
+        Its HTML changes every tick (fresh positions), so it remounts and its
+        script runs once: it finds the persistent map iframe among the parent
+        document's iframes (same-origin sandbox) and hands it the positions.
+        Retries briefly in case Leaflet is still loading on first paint."""
+
+        positions_json = json.dumps(st.session_state.live_flight_positions)
+        html = f"""<script>
+(function() {{
+  var positions = {positions_json};
+  var tries = 0;
+  var timer = setInterval(function() {{
+    tries++;
+    try {{
+      var frames = window.parent.document.querySelectorAll('iframe');
+      for (var i = 0; i < frames.length; i++) {{
+        var w = frames[i].contentWindow;
+        try {{
+          if (w && w.__skywatcherMap && w.__updatePlanes) {{
+            w.__updatePlanes(positions);
+            clearInterval(timer);
+            return;
+          }}
+        }} catch (e) {{ /* cross-origin sibling — skip */ }}
+      }}
+    }} catch (e) {{ clearInterval(timer); }}
+    if (tries > 40) clearInterval(timer);
+  }}, 250);
+}})();
+</script>"""
+        components.html(html, height=0)
 
     def _render_heatmap_tab(lat: float, lon: float) -> None:
         if st.session_state.heatmap_points:
@@ -789,7 +851,9 @@ else:
 
         @st.fragment(run_every=refresh_seconds)
         def _map_frag():
-            _render_live_map(lat, lon)
+            # only the invisible pusher lives in the fragment — the map iframe
+            # itself is rendered once outside it and is never remounted
+            _push_positions()
 
         @st.fragment(run_every=refresh_seconds)
         def _heat_frag():
@@ -816,6 +880,7 @@ else:
         _metrics_frag()
         tab_live, tab_heat = st.tabs(["Live Radar", "Session Heatmap"])
         with tab_live:
+            _render_map_base(lat, lon)
             _map_frag()
         with tab_heat:
             _heat_frag()
@@ -848,7 +913,8 @@ else:
                 )
             tab_live, tab_heat = st.tabs(["Live Radar", "Session Heatmap"])
             with tab_live:
-                _render_live_map(lat, lon)
+                _render_map_base(lat, lon)
+                _push_positions()
             with tab_heat:
                 _render_heatmap_tab(lat, lon)
             st.divider()
