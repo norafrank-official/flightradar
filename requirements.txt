@@ -1,9 +1,8 @@
-
-streamlit==1.56.0
-pandas==2.2.3
-requests==2.32.3
-folium==0.14.0
-streamlit-folium==0.27.1
-streamlit-js-eval==1.0.0
-FlightRadarAPI==1.5.1
-beautifulsoup4==4.12.3
+streamlit>=1.39
+pandas>=2.2
+requests>=2.31
+folium>=0.14
+streamlit-folium>=0.11.1
+streamlit-js-eval>=0.1.7
+FlightRadarAPI>=1.5.1
+beautifulsoup4
