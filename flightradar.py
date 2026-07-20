@@ -407,8 +407,12 @@ else:
 
     st.divider()
 
-    # 3. Init FlightRadar API (cheap, reusable across reruns)
-    fr_api = FlightRadar24API()
+    # 3. FlightRadar API instance lives in session_state: FR24's feed sits behind
+    # an ALB whose AWSALB cookie pins a session to one backend — and some backends
+    # serve empty payloads. A validated (data-serving) instance must be kept.
+    if "fr_api" not in st.session_state:
+        st.session_state.fr_api = FlightRadar24API()
+    fr_api = st.session_state.fr_api
 
     # 4. Build airline lookup once per session (2 000+ airlines, no auth needed)
     if not st.session_state.airline_lookup:
@@ -426,15 +430,40 @@ else:
 
     # --- HELPERS ---
 
-    def _fetch_and_process(lat: float, lon: float, fr_api) -> bool:
+    def _fetch_flights_resilient(fr_bounds: str) -> list:
+        """get_flights with backend failover.
+        FR24's feed ALB pins each session to one backend via the AWSALB cookie;
+        roughly half the backends return HTTP 200 with an EMPTY flight list.
+        If an unverified session returns empty, re-roll the API instance (fresh
+        cookie -> different backend) until one serves data, then keep it.
+        A 30s cooldown avoids hammering the feed when the sky is genuinely quiet."""
+        now = time.time()
+        max_attempts = 1 if st.session_state.get("fr_quiet_until", 0) > now else 4
+        api = st.session_state.fr_api
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                api = FlightRadar24API()
+            flights = api.get_flights(bounds=fr_bounds)
+            if flights:
+                if attempt > 0:
+                    logging.warning(f"FR24 feed backend re-rolled after {attempt} empty response(s)")
+                st.session_state.fr_api = api
+                st.session_state.fr_quiet_until = 0
+                return flights
+        st.session_state.fr_api = api
+        st.session_state.fr_quiet_until = now + 30
+        return []
+
+    def _fetch_and_process(lat: float, lon: float) -> bool:
         """Fetch flights, warm detail cache in parallel, write all display data to session_state."""
         try:
-            bounds = fr_api.get_bounds_by_point(lat, lon, SEARCH_RADIUS_M)
-            flights = fr_api.get_flights(bounds=bounds)
+            bounds = st.session_state.fr_api.get_bounds_by_point(lat, lon, SEARCH_RADIUS_M)
+            flights = _fetch_flights_resilient(bounds)
         except Exception as e:
             logging.warning(f"FlightRadar24 fetch failed: {e}")
             st.error("Could not reach FlightRadar24. Retrying on next tick.")
             return False
+        fr_api = st.session_state.fr_api  # may have been re-rolled to a good backend
 
         count = len(flights) if flights else 0
         st.session_state.live_count = count
@@ -824,7 +853,7 @@ else:
     if refresh_seconds:
         @st.fragment(run_every=refresh_seconds)
         def _metrics_frag():
-            ok = _fetch_and_process(lat, lon, fr_api)
+            ok = _fetch_and_process(lat, lon)
             if not ok:
                 return
             count = st.session_state.live_count
@@ -889,7 +918,7 @@ else:
         st.caption(f"Live mode — auto-refreshing every {refresh_seconds}s. Map & tables update in place.")
 
     else:
-        _fetch_and_process(lat, lon, fr_api)
+        _fetch_and_process(lat, lon)
         count = st.session_state.live_count
         status_label = "OK" if count <= 3 else ("BUSY" if count <= 8 else "CRITICAL")
         cache_size = len(st.session_state.flight_details_cache)
